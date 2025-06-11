@@ -1,0 +1,32 @@
+{
+  "name": "obsidian-research-mcp",
+  "version": "1.0.0",
+  "description": "Advanced MCP server for research-oriented Obsidian vaults with semantic search, concept mapping, and synthesis capabilities",
+  "type": "module",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build:shared && npm run build:server && npm run build:plugin",
+    "build:shared": "cd packages/shared && npm run build",
+    "build:server": "cd packages/mcp-server && npm run build",
+    "build:plugin": "cd packages/obsidian-plugin && npm run build",
+    "dev": "npm run build:shared && cd packages/mcp-server && npm run dev",
+    "test": "npm run test --workspaces",
+    "clean": "npm run clean --workspaces",
+    "lint": "npm run lint --workspaces",
+    "typecheck": "npm run typecheck --workspaces"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "eslint": "^8.0.0",
+    "typescript": "^5.9.2",
+    "vitest": "^1.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

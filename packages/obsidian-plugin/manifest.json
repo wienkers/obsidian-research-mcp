@@ -1,0 +1,11 @@
+{
+  "id": "obsidian-research-mcp",
+  "name": "Research MCP Bridge",
+  "version": "1.0.0",
+  "minAppVersion": "0.15.0",
+  "description": "Enables advanced research capabilities through MCP server integration with semantic search, concept mapping, and synthesis tools",
+  "author": "Research MCP Team",
+  "authorUrl": "https://github.com/research-mcp/obsidian-research-mcp",
+  "fundingUrl": "",
+  "isDesktopOnly": false
+}
