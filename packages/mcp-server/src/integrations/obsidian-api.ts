@@ -144,8 +144,9 @@ export class ObsidianAPI {
     }
     
     // Validate path contains only safe characters
-    // Allow alphanumeric, spaces, hyphens, underscores, dots, and forward slashes
-    if (!/^[a-zA-Z0-9\s\-_./]+$/.test(finalPath)) {
+    // Allow alphanumeric, spaces, common punctuation for Obsidian functionality  
+    // Includes: [], (), "", '', :, ,, !, +, *, =, >, <, &, @, $, %, ^, `, {, }, \, ;, ?, and Unicode characters
+    if (!/^[\w\s\-_./#|[\]()""'':,!+*=><&@$%^`{}\\;?\u00A0-\uFFFF]+$/.test(finalPath)) {
       throw new LoggedError('Invalid path: contains unsafe characters');
     }
     
@@ -1032,208 +1033,49 @@ export class ObsidianAPI {
   async patchContent(
     path: string, 
     operation: 'append' | 'prepend' | 'replace',
-    targetType: 'heading' | 'frontmatter' | 'block',
-    target: string,
+    targetType: 'heading' | 'frontmatter' | 'block' | 'line_range',
+    target: string | { start: number; end: number },
     content: string
   ): Promise<void> {
     try {
       // Block reference operations are not supported
       if (targetType === 'block') {
         throw new LoggedError(
-          `Block reference operations are not supported. Use targetType "heading" or "frontmatter" instead.`
+          `Block reference operations are not supported. Use targetType "heading", "frontmatter", or "line_range" instead.`
         );
       }
       
-      // First, check if the file exists and get its content
-      const fileNote = await this.getNote(path).catch(() => null);
-      if (!fileNote) {
-        throw new LoggedError(`Target file does not exist: ${path}`);
+      // Handle line_range operations directly without using API endpoint
+      if (targetType === 'line_range') {
+        if (typeof target !== 'object' || !target.start || !target.end) {
+          throw new LoggedError('line_range targetType requires target object with start and end properties');
+        }
+        
+        return await this.patchContentLineRange(path, operation, target, content);
       }
       
-      // Build URL without additional encoding
-      const url = `${this.baseUrl}/vault/${path}`;
-      
-      // For headings, we need to try different target formats based on the API spec
-      let targetFormats: string[] = [];
-      
+      // Handle heading operations directly as fallback to avoid API endpoint issues
       if (targetType === 'heading') {
-        // Parse the file content to find the heading hierarchy
-        const lines = fileNote.content.split('\n');
-        const headings: Array<{level: number, text: string}> = [];
-        
-        for (const line of lines) {
-          const match = line.match(/^(#{1,6})\s+(.+)$/);
-          if (match) {
-            const level = match[1].length;
-            const text = match[2].trim();
-            headings.push({ level, text });
-          }
+        if (typeof target !== 'string') {
+          throw new LoggedError('heading targetType requires target to be a string');
         }
         
-        // Find target heading and build hierarchical path
-        let targetPath = '';
-        let targetFound = false;
-        for (let i = 0; i < headings.length; i++) {
-          if (headings[i].text === target) {
-            targetFound = true;
-            // Build the hierarchical path
-            const pathParts: string[] = [];
-            let currentLevel = headings[i].level;
-            
-            // Go backwards to find parent headings
-            for (let j = i; j >= 0; j--) {
-              if (headings[j].level < currentLevel) {
-                pathParts.unshift(headings[j].text);
-                currentLevel = headings[j].level;
-              }
-            }
-            
-            // Add the target heading itself
-            pathParts.push(target);
-            targetPath = pathParts.join('::');
-            break;
-          }
-        }
-        
-        // Check if heading exists in the file
-        if (!targetFound) {
-          const availableHeadings = headings.map(h => `"${h.text}"`).join(', ');
-          throw new LoggedError(
-            `Heading "${target}" not found in file "${path}". Available headings: ${availableHeadings || 'none'}`
-          );
-        }
-        
-        if (targetPath) {
-          targetFormats.push(targetPath);
-        }
-        
-        // Also try the simple target as fallback
-        targetFormats.push(target);
-      } else if (targetType === 'frontmatter') {
-        // For frontmatter, use target as-is - field existence check happens in the loop
-        targetFormats.push(target);
-      } else {
-        // other target types - use as-is
-        targetFormats.push(target);
-      }
-      
-      // Try each target format
-      let lastError: any = null;
-      
-      for (const targetValue of targetFormats) {
+        // Try API endpoint first, but fall back to manual implementation
         try {
-          // Ensure proper spacing for content based on operation
-          let processedContent = content;
-          if (targetType === 'heading') {
-            if (operation === 'replace') {
-              // For replace operations, ensure content ends with newline but don't add extra spacing to avoid doubling headers
-              if (!processedContent.endsWith('\n')) {
-                processedContent = processedContent + '\n';
-              }
-            } else if (operation === 'append') {
-              // Ensure content starts with a newline and ends with double newline for proper spacing
-              if (!processedContent.startsWith('\n')) {
-                processedContent = '\n' + processedContent;
-              }
-              if (!processedContent.endsWith('\n\n')) {
-                if (processedContent.endsWith('\n')) {
-                  processedContent = processedContent + '\n';
-                } else {
-                  processedContent = processedContent + '\n\n';
-                }
-              }
-            } else if (operation === 'prepend') {
-              // Ensure content ends with double newline for proper spacing
-              if (!processedContent.endsWith('\n\n')) {
-                if (processedContent.endsWith('\n')) {
-                  processedContent = processedContent + '\n';
-                } else {
-                  processedContent = processedContent + '\n\n';
-                }
-              }
-            }
-          }
-          
-          // Build headers based on target type
-          const headers: Record<string, string> = {
-            ...this.headers,
-            'Content-Type': 'text/markdown',
-            'Operation': operation,
-            'Target-Type': targetType,
-            'Target': encodeURIComponent(targetValue),
-          };
-          
-          // For frontmatter operations, check if we need Create-Target-If-Missing
-          if (targetType === 'frontmatter') {
-            const frontmatterMatch = fileNote.content.match(/^---\s*\n([\s\S]*?)\n---/);
-            let fieldExists = false;
-            
-            if (frontmatterMatch) {
-              const frontmatterContent = frontmatterMatch[1];
-              const fieldPattern = new RegExp(`^${targetValue.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*:`, 'm');
-              fieldExists = fieldPattern.test(frontmatterContent);
-            }
-            
-            if (!fieldExists) {
-              headers['Create-Target-If-Missing'] = 'true';
-              logger.debug('Added Create-Target-If-Missing header for new frontmatter field', { targetValue });
-            }
-          }
-          
-          const options = this.getFetchOptions({
-            method: 'PATCH',
-            body: processedContent,
-            headers,
+          return await this.patchContentWithAPI(path, operation, targetType, target, content);
+        } catch (apiError) {
+          logger.warn('API endpoint failed for heading operation, falling back to manual implementation', { 
+            error: apiError, 
+            path, 
+            operation, 
+            target 
           });
-
-          logger.debug('PATCH request attempt', {
-            url,
-            method: 'PATCH',
-            headers,
-            originalContentLength: content.length,
-            processedContentLength: processedContent.length,
-            path,
-            operation,
-            targetType,
-            originalTarget: target,
-            attemptedTarget: targetValue,
-          });
-
-          const response = await fetch(url, options);
-
-          if (response.ok) {
-            logger.debug('PATCH request successful', { targetValue });
-            return;
-          }
-          
-          const responseText = await response.text().catch(() => 'Unable to read response');
-          lastError = {
-            status: response.status,
-            statusText: response.statusText,
-            responseText,
-            targetValue,
-          };
-          
-          logger.debug('PATCH attempt failed', lastError);
-          
-        } catch (error) {
-          lastError = { error, targetValue };
-          logger.debug('PATCH attempt error', lastError);
+          return await this.patchContentHeading(path, operation, target, content);
         }
       }
       
-      // If we get here, all attempts failed
-      logger.error('All PATCH attempts failed', { 
-        lastError, 
-        path, 
-        operation, 
-        targetType, 
-        target,
-        attemptedFormats: targetFormats 
-      });
-      
-      const errorMessage = lastError?.responseText || lastError?.error?.message || 'Unknown error';
-      throw new LoggedError(`Failed to patch file content after trying ${targetFormats.length} target formats: ${errorMessage}`);
+      // For other operations (frontmatter), use the API endpoint directly
+      return await this.patchContentWithAPI(path, operation, targetType, target as string, content);
       
     } catch (error) {
       logger.error('PATCH request error', { error, path, operation, targetType, target });
@@ -1277,6 +1119,447 @@ export class ObsidianAPI {
       };
     } catch (error) {
       throw new LoggedError('Failed to get active note', { error });
+    }
+  }
+
+  private async patchContentLineRange(
+    path: string,
+    operation: 'append' | 'prepend' | 'replace',
+    target: { start: number; end: number },
+    content: string
+  ): Promise<void> {
+    try {
+      // Get the current file content
+      const currentContent = await this.getFileContent(path);
+      const lines = currentContent.split('\n');
+      
+      // Validate line numbers against actual file content
+      if (target.start < 1 || target.start > lines.length) {
+        throw new LoggedError(`Invalid start line ${target.start}. File has ${lines.length} lines.`);
+      }
+      
+      if (target.end < 1 || target.end > lines.length) {
+        throw new LoggedError(`Invalid end line ${target.end}. File has ${lines.length} lines.`);
+      }
+      
+      if (target.end < target.start) {
+        throw new LoggedError(`End line ${target.end} cannot be before start line ${target.start}.`);
+      }
+
+      // Convert to 0-based indexing for array manipulation
+      const startIdx = target.start - 1;
+      const endIdx = target.end - 1;
+      
+      // Prepare content to insert (ensure proper line endings)
+      let processedContent = content;
+      if (processedContent && !processedContent.endsWith('\n')) {
+        processedContent = processedContent + '\n';
+      }
+      
+      // Remove trailing newline if content is empty to avoid adding blank lines
+      if (!processedContent.trim()) {
+        processedContent = '';
+      }
+      
+      const contentLines = processedContent ? processedContent.split('\n').slice(0, -1) : []; // Remove last empty element from split
+      
+      let newLines: string[];
+      
+      switch (operation) {
+        case 'replace':
+          // Replace the specified range with new content
+          newLines = [
+            ...lines.slice(0, startIdx),
+            ...contentLines,
+            ...lines.slice(endIdx + 1)
+          ];
+          break;
+          
+        case 'append':
+          // Insert content after the specified range
+          newLines = [
+            ...lines.slice(0, endIdx + 1),
+            ...contentLines,
+            ...lines.slice(endIdx + 1)
+          ];
+          break;
+          
+        case 'prepend':
+          // Insert content before the specified range
+          newLines = [
+            ...lines.slice(0, startIdx),
+            ...contentLines,
+            ...lines.slice(startIdx)
+          ];
+          break;
+          
+        default:
+          throw new LoggedError(`Unsupported operation: ${operation}`);
+      }
+      
+      // Join the lines back together and update the file
+      const newContent = newLines.join('\n');
+      await this.updateFileContent(path, newContent);
+      
+      logger.debug('Line range operation completed successfully', {
+        path,
+        operation,
+        lineRange: `${target.start}-${target.end}`,
+        originalLineCount: lines.length,
+        newLineCount: newLines.length,
+        contentLinesAdded: contentLines.length
+      });
+      
+    } catch (error) {
+      logger.error('Line range patch operation failed', { 
+        error, 
+        path, 
+        operation, 
+        target 
+      });
+      
+      if (error instanceof LoggedError) {
+        throw error;
+      }
+      
+      throw new LoggedError('Failed to perform line range operation', { 
+        error, 
+        path, 
+        operation, 
+        target 
+      });
+    }
+  }
+
+  private async patchContentWithAPI(
+    path: string,
+    operation: 'append' | 'prepend' | 'replace',
+    targetType: 'heading' | 'frontmatter',
+    target: string,
+    content: string
+  ): Promise<void> {
+    // This contains the original API endpoint logic
+    const fileNote = await this.getNote(path).catch(() => null);
+    if (!fileNote) {
+      throw new LoggedError(`Target file does not exist: ${path}`);
+    }
+
+    // Build URL without additional encoding
+    const url = `${this.baseUrl}/vault/${path}`;
+    
+    // For headings, we need to try different target formats based on the API spec
+    let targetFormats: string[] = [];
+    
+    if (targetType === 'heading') {
+      // Verify the heading exists in the file first
+      const lines = fileNote.content.split('\n');
+      const headings: Array<{level: number, text: string, index: number}> = [];
+      
+      for (let i = 0; i < lines.length; i++) {
+        const match = lines[i].match(/^(#{1,6})\s+(.+)$/);
+        if (match) {
+          const level = match[1].length;
+          const text = match[2].trim();
+          headings.push({ level, text, index: i });
+        }
+      }
+      
+      // Find target heading
+      const targetHeading = headings.find(h => h.text === target);
+      if (!targetHeading) {
+        const availableHeadings = headings.map(h => `"${h.text}" (level ${h.level})`).join(', ');
+        throw new LoggedError(
+          `Heading "${target}" not found in file "${path}". Available headings: ${availableHeadings || 'none'}`
+        );
+      }
+      
+      // Try multiple target formats in order of preference:
+      // 1. Simple heading text (most common)
+      targetFormats.push(target);
+      
+      // 2. Build hierarchical path as fallback
+      const pathParts: string[] = [];
+      let currentLevel = targetHeading.level;
+      
+      // Find parent headings going backwards from target
+      for (let j = targetHeading.index; j >= 0; j--) {
+        const heading = headings.find(h => h.index === j);
+        if (heading && heading.level < currentLevel) {
+          pathParts.unshift(heading.text);
+          currentLevel = heading.level;
+        }
+      }
+      
+      // Add target heading itself
+      pathParts.push(target);
+      const hierarchicalPath = pathParts.join('::');
+      
+      // Only add hierarchical path if it's different from simple target
+      if (hierarchicalPath !== target) {
+        targetFormats.push(hierarchicalPath);
+      }
+      
+      logger.debug('Heading targeting prepared', {
+        target,
+        foundHeading: targetHeading,
+        targetFormats,
+        totalHeadings: headings.length
+      });
+    } else if (targetType === 'frontmatter') {
+      // For frontmatter, use target as-is - field existence check happens in the loop
+      targetFormats.push(target);
+    } else {
+      // other target types - use as-is
+      targetFormats.push(target);
+    }
+    
+    // Try each target format
+    let lastError: any = null;
+    
+    for (const targetValue of targetFormats) {
+      try {
+        // Ensure proper spacing for content based on operation
+        let processedContent = content;
+        if (targetType === 'heading') {
+          if (operation === 'replace') {
+            // For replace operations, ensure content ends with newline but don't add extra spacing to avoid doubling headers
+            if (!processedContent.endsWith('\n')) {
+              processedContent = processedContent + '\n';
+            }
+          } else if (operation === 'append') {
+            // Ensure content starts with a newline and ends with double newline for proper spacing
+            if (!processedContent.startsWith('\n')) {
+              processedContent = '\n' + processedContent;
+            }
+            if (!processedContent.endsWith('\n\n')) {
+              if (processedContent.endsWith('\n')) {
+                processedContent = processedContent + '\n';
+              } else {
+                processedContent = processedContent + '\n\n';
+              }
+            }
+          } else if (operation === 'prepend') {
+            // Ensure content ends with double newline for proper spacing
+            if (!processedContent.endsWith('\n\n')) {
+              if (processedContent.endsWith('\n')) {
+                processedContent = processedContent + '\n';
+              } else {
+                processedContent = processedContent + '\n\n';
+              }
+            }
+          }
+        }
+        
+        // Build headers based on target type
+        const headers: Record<string, string> = {
+          ...this.headers,
+          'Content-Type': 'text/markdown',
+          'Operation': operation,
+          'Target-Type': targetType,
+          'Target': encodeURIComponent(targetValue),
+        };
+        
+        // For frontmatter operations, check if we need Create-Target-If-Missing
+        if (targetType === 'frontmatter') {
+          const frontmatterMatch = fileNote.content.match(/^---\s*\n([\s\S]*?)\n---/);
+          let fieldExists = false;
+          
+          if (frontmatterMatch) {
+            const frontmatterContent = frontmatterMatch[1];
+            const fieldPattern = new RegExp(`^${targetValue.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*:`, 'm');
+            fieldExists = fieldPattern.test(frontmatterContent);
+          }
+          
+          if (!fieldExists) {
+            headers['Create-Target-If-Missing'] = 'true';
+            logger.debug('Added Create-Target-If-Missing header for new frontmatter field', { targetValue });
+          }
+        }
+        
+        const options = this.getFetchOptions({
+          method: 'PATCH',
+          body: processedContent,
+          headers,
+        });
+
+        logger.debug('PATCH request attempt', {
+          url,
+          method: 'PATCH',
+          headers,
+          originalContentLength: content.length,
+          processedContentLength: processedContent.length,
+          path,
+          operation,
+          targetType,
+          originalTarget: target,
+          attemptedTarget: targetValue,
+        });
+
+        const response = await fetch(url, options);
+
+        if (response.ok) {
+          logger.debug('PATCH request successful', { targetValue });
+          return;
+        }
+        
+        const responseText = await response.text().catch(() => 'Unable to read response');
+        lastError = {
+          status: response.status,
+          statusText: response.statusText,
+          responseText,
+          targetValue,
+        };
+        
+        logger.debug('PATCH attempt failed', lastError);
+        
+      } catch (error) {
+        lastError = { error, targetValue };
+        logger.debug('PATCH attempt error', lastError);
+      }
+    }
+    
+    // If we get here, all attempts failed
+    logger.error('All PATCH attempts failed', { 
+      lastError, 
+      path, 
+      operation, 
+      targetType, 
+      target,
+      attemptedFormats: targetFormats 
+    });
+    
+    const errorMessage = lastError?.responseText || lastError?.error?.message || 'Unknown error';
+    throw new LoggedError(`Failed to patch file content after trying ${targetFormats.length} target formats: ${errorMessage}`);
+  }
+
+  private async patchContentHeading(
+    path: string,
+    operation: 'append' | 'prepend' | 'replace',
+    target: string,
+    content: string
+  ): Promise<void> {
+    try {
+      // Get the current file content
+      const currentContent = await this.getFileContent(path);
+      const lines = currentContent.split('\n');
+      
+      // Find the target heading
+      let targetLineIndex = -1;
+      let targetLevel = 0;
+      const headingRegex = /^(#{1,6})\s+(.+)$/;
+      
+      for (let i = 0; i < lines.length; i++) {
+        const match = lines[i].match(headingRegex);
+        if (match && match[2].trim() === target) {
+          targetLineIndex = i;
+          targetLevel = match[1].length;
+          break;
+        }
+      }
+      
+      if (targetLineIndex === -1) {
+        const availableHeadings = lines
+          .map((line, i) => ({ line, index: i }))
+          .filter(item => headingRegex.test(item.line))
+          .map(item => {
+            const match = item.line.match(headingRegex);
+            return `"${match![2].trim()}" (level ${match![1].length})`;
+          })
+          .join(', ');
+          
+        throw new LoggedError(
+          `Heading "${target}" not found in file "${path}". Available headings: ${availableHeadings || 'none'}`
+        );
+      }
+      
+      // Find the end of this section (next heading of same or higher level, or end of file)
+      let sectionEndIndex = lines.length;
+      for (let i = targetLineIndex + 1; i < lines.length; i++) {
+        const match = lines[i].match(headingRegex);
+        if (match && match[1].length <= targetLevel) {
+          sectionEndIndex = i;
+          break;
+        }
+      }
+      
+      // Prepare content to insert
+      let processedContent = content.trim();
+      const contentLines = processedContent ? processedContent.split('\n') : [];
+      
+      let newLines: string[];
+      
+      switch (operation) {
+        case 'replace':
+          // Replace the heading and everything between it and the next section
+          newLines = [
+            ...lines.slice(0, targetLineIndex), // Exclude original heading
+            ...contentLines,
+            '',  // Add blank line before next section
+            ...lines.slice(sectionEndIndex)
+          ];
+          break;
+          
+        case 'append':
+          // Add content at the end of the section
+          const insertIndex = sectionEndIndex;
+          newLines = [
+            ...lines.slice(0, insertIndex),
+            '',  // Add blank line before new content
+            ...contentLines,
+            '',  // Add blank line after new content
+            ...lines.slice(insertIndex)
+          ];
+          break;
+          
+        case 'prepend':
+          // Add content right after the heading
+          newLines = [
+            ...lines.slice(0, targetLineIndex + 1), // Keep heading
+            '',  // Add blank line after heading
+            ...contentLines,
+            '',  // Add blank line after new content
+            ...lines.slice(targetLineIndex + 1)
+          ];
+          break;
+          
+        default:
+          throw new LoggedError(`Unsupported operation: ${operation}`);
+      }
+      
+      // Join the lines back together and update the file
+      const newContent = newLines.join('\n');
+      await this.updateFileContent(path, newContent);
+      
+      logger.debug('Manual heading operation completed successfully', {
+        path,
+        operation,
+        target,
+        targetLineIndex,
+        targetLevel,
+        sectionEndIndex,
+        originalLineCount: lines.length,
+        newLineCount: newLines.length,
+        contentLinesAdded: contentLines.length
+      });
+      
+    } catch (error) {
+      logger.error('Manual heading patch operation failed', { 
+        error, 
+        path, 
+        operation, 
+        target 
+      });
+      
+      if (error instanceof LoggedError) {
+        throw error;
+      }
+      
+      throw new LoggedError('Failed to perform heading operation', { 
+        error, 
+        path, 
+        operation, 
+        target 
+      });
     }
   }
 }

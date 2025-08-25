@@ -49,30 +49,13 @@ describe('obsidian_analyze Integration Tests', () => {
         files: [{
           path: 'test.md',
           title: 'Test Document',
-          elements: [
-            {
-              type: 'headings',
-              content: 'Introduction',
-              lineNumber: 1,
-              level: 2,
-              raw: '## Introduction'
-            },
-            {
-              type: 'headings',
-              content: 'Conclusion', 
-              lineNumber: 10,
-              level: 2,
-              raw: '## Conclusion'
-            }
-          ],
           hierarchy: {
             sections: [{
               heading: {
                 type: 'headings',
-                content: 'Introduction',
+                content: '## Introduction',
                 lineNumber: 1,
-                level: 2,
-                raw: '## Introduction'
+                level: 2
               },
               level: 2,
               children: [],
@@ -126,8 +109,7 @@ describe('obsidian_analyze Integration Tests', () => {
             target: 'test.md',
             analysis: ['structure'],
             options: {
-              extractTypes: ['headings'],
-              includeHierarchy: true
+              extractTypes: ['headings']
             }
           }
         }
@@ -161,7 +143,6 @@ describe('obsidian_analyze Integration Tests', () => {
           {
             path: 'file1.md',
             title: 'File One',
-            elements: [],
             summary: {
               totalElements: 1,
               byType: { headings: 1, lists: 0, code_blocks: 0, tasks: 0, quotes: 0, tables: 0, links: 0, embeds: 0 },
@@ -172,7 +153,6 @@ describe('obsidian_analyze Integration Tests', () => {
           {
             path: 'file2.md',
             title: 'File Two',
-            elements: [],
             summary: {
               totalElements: 2,
               byType: { headings: 2, lists: 0, code_blocks: 0, tasks: 0, quotes: 0, tables: 0, links: 0, embeds: 0 },
@@ -208,12 +188,23 @@ describe('obsidian_analyze Integration Tests', () => {
         files: [{
           path: 'comprehensive.md',
           title: 'Comprehensive Test',
-          elements: extractTypes.map(type => ({
-            type,
-            content: `Sample ${type} content`,
-            lineNumber: 1,
-            raw: `Sample ${type}`
-          })),
+          hierarchy: {
+            sections: [{
+              heading: {
+                type: 'headings',
+                content: '# Sample heading content',
+                lineNumber: 1,
+                level: 1
+              },
+              level: 1,
+              children: extractTypes.filter(t => t !== 'headings').map(type => ({
+                type,
+                content: `Sample ${type}`,
+                lineNumber: 2
+              })),
+              subsections: []
+            }]
+          },
           summary: {
             totalElements: extractTypes.length,
             byType: Object.fromEntries(extractTypes.map(t => [t, 1])),
@@ -472,7 +463,7 @@ describe('obsidian_analyze Integration Tests', () => {
 
       const result = await (server as any).handleConsolidatedAnalyze({
         target: 'mixed.md',
-        analysis: ['structure', 'sections', 'elements', 'themes'],
+        analysis: ['structure', 'sections'],
         sectionIdentifiers: ['Introduction']
       });
 
@@ -483,8 +474,6 @@ describe('obsidian_analyze Integration Tests', () => {
       const responseData = JSON.parse(result.content[0].text);
       expect(responseData.analysis).toHaveProperty('structure');
       expect(responseData.analysis).toHaveProperty('sections');
-      expect(responseData.analysis).toHaveProperty('elements');
-      expect(responseData.analysis).toHaveProperty('themes');
     });
   });
 
@@ -492,7 +481,7 @@ describe('obsidian_analyze Integration Tests', () => {
     it('should pass through all structure extractor options', async () => {
       const options = {
         extractTypes: ['headings', 'lists'],
-        includeHierarchy: false,
+        includeHierarchy: true,
         includeContext: true,
         contextWindow: 3,
         minHeadingLevel: 2,
@@ -515,7 +504,7 @@ describe('obsidian_analyze Integration Tests', () => {
       expect(structureExtractor.extractStructure).toHaveBeenCalledWith({
         paths: ['test.md'],
         extractTypes: ['headings', 'lists'],
-        includeHierarchy: false,
+        includeHierarchy: true,
         includeContext: true,
         contextWindow: 3,
         minHeadingLevel: 2,

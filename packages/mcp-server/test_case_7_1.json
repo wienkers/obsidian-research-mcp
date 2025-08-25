@@ -1,0 +1,16 @@
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/call",
+  "params": {
+    "name": "obsidian_analyze",
+    "arguments": {
+      "target": "Tests/Analytics Test Note.md",
+      "analysis": ["structure"],
+      "options": {
+        "extractTypes": ["headings", "lists", "tasks"],
+        "includeHierarchy": true
+      }
+    }
+  }
+}

@@ -84,7 +84,7 @@ describe('Consolidated Tools Schema Validation', () => {
         options: { threshold: 1.5 }
       };
 
-      expect(() => validateSemanticSearchParams(invalidInput)).toThrow('Threshold must be between 0 and 1');
+      expect(() => validateSemanticSearchParams(invalidInput)).toThrow('Semantic similarity threshold must be between 0 (broad) and 1 (precise)');
     });
 
     describe('boundary value testing', () => {
@@ -148,7 +148,7 @@ describe('Consolidated Tools Schema Validation', () => {
           options: { threshold: -0.1 }
         };
 
-        expect(() => validateSemanticSearchParams(invalidInput)).toThrow('Threshold must be between 0 and 1');
+        expect(() => validateSemanticSearchParams(invalidInput)).toThrow('Semantic similarity threshold must be between 0 (broad) and 1 (precise)');
       });
 
       it('should throw error for threshold above maximum', () => {
@@ -157,7 +157,7 @@ describe('Consolidated Tools Schema Validation', () => {
           options: { threshold: 1.1 }
         };
 
-        expect(() => validateSemanticSearchParams(invalidInput)).toThrow('Threshold must be between 0 and 1');
+        expect(() => validateSemanticSearchParams(invalidInput)).toThrow('Semantic similarity threshold must be between 0 (broad) and 1 (precise)');
       });
     });
 
@@ -892,45 +892,41 @@ describe('Consolidated Tools Schema Validation', () => {
     });
 
     it('should throw error for non-array input', () => {
-      expect(() => validateLinkedToParams('not an array')).toThrow('LinkedTo must be an array of file paths');
+      expect(() => validateLinkedToParams('not an array')).toThrow('linkedTo must be an array of file paths or basenames');
     });
 
     it('should throw error for non-string items', () => {
-      expect(() => validateLinkedToParams(['valid.md', 123, 'another.md'])).toThrow('LinkedTo item at index 1 must be a string');
+      expect(() => validateLinkedToParams(['valid.md', 123, 'another.md'])).toThrow('linkedTo item at index 1 must be a string');
     });
 
     it('should throw error for empty string items', () => {
-      expect(() => validateLinkedToParams(['valid.md', '', 'another.md'])).toThrow('LinkedTo item at index 1 cannot be empty');
-      expect(() => validateLinkedToParams(['valid.md', '   ', 'another.md'])).toThrow('LinkedTo item at index 1 cannot be empty');
+      expect(() => validateLinkedToParams(['valid.md', '', 'another.md'])).toThrow('linkedTo item at index 1 cannot be empty');
+      expect(() => validateLinkedToParams(['valid.md', '   ', 'another.md'])).toThrow('linkedTo item at index 1 cannot be empty');
     });
 
     it('should throw error for paths that are too long', () => {
       const longPath = 'a'.repeat(501);
-      expect(() => validateLinkedToParams([longPath])).toThrow('LinkedTo item at index 0 is too long (max 500 characters)');
+      expect(() => validateLinkedToParams([longPath])).toThrow('linkedTo item at index 0 exceeds maximum length (500 chars)');
     });
 
     it('should throw error for absolute paths', () => {
-      expect(() => validateLinkedToParams(['/absolute/path.md'])).toThrow('LinkedTo item at index 0 should be a relative path within the vault');
-      expect(() => validateLinkedToParams(['C:/windows/path.md'])).toThrow('LinkedTo item at index 0 should be a relative path within the vault');
+      expect(() => validateLinkedToParams(['/absolute/path.md'])).toThrow('linkedTo item at index 0 should be relative to vault root, not absolute path');
+      expect(() => validateLinkedToParams(['C:/windows/path.md'])).toThrow('linkedTo item at index 0 should be relative to vault root, not absolute path');
     });
 
     it('should throw error for directory traversal attempts', () => {
-      expect(() => validateLinkedToParams(['../outside.md'])).toThrow('LinkedTo item at index 0 cannot contain directory traversal');
-      expect(() => validateLinkedToParams(['folder/../other.md'])).toThrow('LinkedTo item at index 0 cannot contain directory traversal');
+      expect(() => validateLinkedToParams(['../outside.md'])).toThrow('linkedTo item at index 0 cannot contain directory traversal patterns');
+      expect(() => validateLinkedToParams(['folder/../other.md'])).toThrow('linkedTo item at index 0 cannot contain directory traversal patterns');
     });
 
     it('should throw error for invalid characters', () => {
-      expect(() => validateLinkedToParams(['file<name>.md'])).toThrow('LinkedTo item at index 0 contains invalid characters');
-      expect(() => validateLinkedToParams(['file|name.md'])).toThrow('LinkedTo item at index 0 contains invalid characters');
+      expect(() => validateLinkedToParams(['file<name>.md'])).toThrow('linkedTo item at index 0 contains invalid filename characters');
+      expect(() => validateLinkedToParams(['file|name.md'])).toThrow('linkedTo item at index 0 contains invalid filename characters');
     });
 
-    it('should throw error for reserved filenames', () => {
-      expect(() => validateLinkedToParams(['CON'])).toThrow('LinkedTo item at index 0 is a reserved filename');
-      expect(() => validateLinkedToParams(['PRN.md'])).toThrow('LinkedTo item at index 0 is a reserved filename');
-    });
 
     it('should throw error for null bytes', () => {
-      expect(() => validateLinkedToParams(['file\0name.md'])).toThrow('LinkedTo item at index 0 cannot contain null bytes');
+      expect(() => validateLinkedToParams(['file\0name.md'])).toThrow('linkedTo item at index 0 contains invalid null bytes');
     });
   });
 
@@ -1023,13 +1019,13 @@ describe('Consolidated Tools Schema Validation', () => {
         target: ''
       };
 
-      expect(() => validateTargetInput(invalidInput)).toThrow('Target is required');
+      expect(() => validateTargetInput(invalidInput)).toThrow('Target file path(s) required');
     });
 
     it('should throw error for missing target', () => {
       const invalidInput = {};
 
-      expect(() => validateTargetInput(invalidInput)).toThrow('Target is required');
+      expect(() => validateTargetInput(invalidInput)).toThrow('Target file path(s) required');
     });
 
     it('should throw error for whitespace-only target', () => {
@@ -1037,7 +1033,7 @@ describe('Consolidated Tools Schema Validation', () => {
         target: '   '
       };
 
-      expect(() => validateTargetInput(invalidInput)).toThrow('Target path cannot be empty');
+      expect(() => validateTargetInput(invalidInput)).toThrow('Target file path cannot be empty');
     });
 
     it('should throw error for empty target array', () => {
@@ -1045,7 +1041,7 @@ describe('Consolidated Tools Schema Validation', () => {
         target: []
       };
 
-      expect(() => validateTargetInput(invalidInput)).toThrow('Target array cannot be empty');
+      expect(() => validateTargetInput(invalidInput)).toThrow('Target array cannot be empty - provide at least one file path');
     });
 
     describe('Integration Tests - obsidian_get_notes', () => {
@@ -1335,7 +1331,7 @@ describe('Consolidated Tools Schema Validation', () => {
           invalidPaths.forEach(path => {
             if (path === null || path === undefined) {
               const params = {};
-              expect(() => validateTargetInput(params)).toThrow('Target is required');
+              expect(() => validateTargetInput(params)).toThrow('Target file path(s) required');
             } else {
               const params = { target: path };
               if (path.trim().length === 0) {
@@ -1832,7 +1828,7 @@ console.log('code block');
         
         const relativeMode = schema?.relativeMode.properties;
         expect(relativeMode?.operation.enum).toEqual(['append', 'prepend', 'replace']);
-        expect(relativeMode?.targetType.enum).toEqual(['heading', 'frontmatter']);
+        expect(relativeMode?.targetType.enum).toEqual(['heading', 'frontmatter', 'line_range']);
       });
     });
 
@@ -1939,7 +1935,7 @@ console.log('code block');
     it('should have correct schema structure', () => {
       expect(exploreTool).toBeDefined();
       expect(exploreTool?.name).toBe('obsidian_explore');
-      expect(exploreTool?.description).toContain('filtering capabilities');
+      expect(exploreTool?.description).toContain('Vault navigation');
       expect(exploreTool?.inputSchema.properties).toHaveProperty('mode');
       expect(exploreTool?.inputSchema.properties).toHaveProperty('scope');
       expect(exploreTool?.inputSchema.properties).toHaveProperty('filters');
@@ -1994,9 +1990,9 @@ console.log('code block');
         expect(validInput.scope.recursive).toBe(true);
       });
 
-      it('should have recursive default to false', () => {
+      it('should have recursive default to true', () => {
         const scopeProperty = exploreTool?.inputSchema.properties.scope;
-        expect(scopeProperty.properties.recursive.default).toBe(false);
+        expect(scopeProperty.properties.recursive.default).toBe(true);
       });
     });
 
@@ -2529,22 +2525,22 @@ console.log('code block');
     describe('error validation', () => {
       it('should throw error for missing target', () => {
         const invalidInput = {};
-        expect(() => validateTargetInput(invalidInput)).toThrow('Target is required');
+        expect(() => validateTargetInput(invalidInput)).toThrow('Target file path(s) required');
       });
 
       it('should throw error for empty target string', () => {
         const invalidInput = { target: '' };
-        expect(() => validateTargetInput(invalidInput)).toThrow('Target is required');
+        expect(() => validateTargetInput(invalidInput)).toThrow('Target file path(s) required');
       });
 
       it('should throw error for empty target array', () => {
         const invalidInput = { target: [] };
-        expect(() => validateTargetInput(invalidInput)).toThrow('Target array cannot be empty');
+        expect(() => validateTargetInput(invalidInput)).toThrow('Target array cannot be empty - provide at least one file path');
       });
 
       it('should throw error for whitespace-only target', () => {
         const invalidInput = { target: '   ' };
-        expect(() => validateTargetInput(invalidInput)).toThrow('Target path cannot be empty');
+        expect(() => validateTargetInput(invalidInput)).toThrow('Target file path cannot be empty');
       });
 
       it('should throw error for invalid path in array', () => {
@@ -3149,7 +3145,7 @@ console.log('code block');
             relationshipTypes: ['backlinks']
           };
 
-          expect(() => validateTargetInput(params)).toThrow('Target array cannot be empty');
+          expect(() => validateTargetInput(params)).toThrow('Target array cannot be empty - provide at least one file path');
         });
 
         it('should handle very large batch sizes', async () => {
@@ -3288,7 +3284,7 @@ console.log('code block');
     });
 
     it('should validate all analysis types', () => {
-      const analysisTypes = ['structure', 'elements', 'themes', 'quality', 'readability', 'connections', 'metadata'];
+      const analysisTypes = ['structure', 'sections'];
       
       analysisTypes.forEach(analysisType => {
         const validInput = {
@@ -3319,7 +3315,6 @@ console.log('code block');
         options: {
           minHeadingLevel: 2,
           maxHeadingLevel: 4,
-          includeHierarchy: true,
           includeContext: true,
           contextWindow: 3
         }
@@ -3460,7 +3455,7 @@ console.log('code block');
     });
 
     it('should validate all combinations of analysis types', () => {
-      const analysisTypes = ['structure', 'sections', 'elements', 'themes', 'quality', 'readability', 'connections', 'metadata'];
+      const analysisTypes = ['structure', 'sections'];
       
       // Test all combinations of 2
       for (let i = 0; i < analysisTypes.length; i++) {
@@ -3510,7 +3505,7 @@ console.log('code block');
       const analysisProperty = analyzeTool?.inputSchema.properties.analysis;
       
       expect(analysisProperty.items.enum).toEqual([
-        'structure', 'sections', 'elements', 'themes', 'quality', 'readability', 'connections', 'metadata'
+        'structure', 'sections'
       ]);
     });
 
@@ -3547,7 +3542,6 @@ console.log('code block');
     it('should validate boolean option defaults', () => {
       const optionsProperty = analyzeTool?.inputSchema.properties.options;
       
-      expect(optionsProperty.properties.includeHierarchy.default).toBe(true);
       expect(optionsProperty.properties.includeContext.default).toBe(false);
       expect(optionsProperty.properties.includeSectionContext.default).toBe(true);
       expect(optionsProperty.properties.includeMetadata.default).toBe(true);
@@ -3568,7 +3562,7 @@ console.log('code block');
     it('should validate complex nested section identifier scenarios', () => {
       const complexValidInput = {
         target: ['file1.md', 'file2.md', 'file3.md'],
-        analysis: ['structure', 'sections', 'elements'],
+        analysis: ['structure', 'sections'],
         sectionIdentifiers: [
           'Introduction',
           { type: 'heading', value: 'Methodology' },
@@ -3579,7 +3573,6 @@ console.log('code block');
         ],
         options: {
           extractTypes: ['headings', 'lists', 'code_blocks', 'tables'],
-          includeHierarchy: false,
           includeContext: true,
           includeSectionContext: true,
           includeMetadata: true,
@@ -3591,7 +3584,7 @@ console.log('code block');
       };
       
       expect(complexValidInput.target).toHaveLength(3);
-      expect(complexValidInput.analysis).toHaveLength(3);
+      expect(complexValidInput.analysis).toHaveLength(2);
       expect(complexValidInput.sectionIdentifiers).toHaveLength(6);
       expect(complexValidInput.options.extractTypes).toHaveLength(4);
     });
@@ -3599,14 +3592,13 @@ console.log('code block');
     it('should validate all available option combinations', () => {
       const comprehensiveOptions = {
         target: 'comprehensive.md',
-        analysis: ['structure', 'sections', 'elements', 'themes', 'quality', 'readability', 'connections', 'metadata'],
+        analysis: ['structure', 'sections'],
         sectionIdentifiers: [
           'All Sections',
           { type: 'pattern', value: '.*' }
         ],
         options: {
           extractTypes: ['headings', 'lists', 'code_blocks', 'tasks', 'quotes', 'tables', 'links', 'embeds'],
-          includeHierarchy: true,
           includeContext: true,
           includeSectionContext: true,
           includeMetadata: true,
@@ -3617,7 +3609,7 @@ console.log('code block');
         }
       };
       
-      expect(comprehensiveOptions.analysis).toHaveLength(8);
+      expect(comprehensiveOptions.analysis).toHaveLength(2);
       expect(comprehensiveOptions.options.extractTypes).toHaveLength(8);
       expect(comprehensiveOptions.options.contextWindow).toBe(10);
     });
@@ -3680,7 +3672,6 @@ console.log('code block');
         ],
         options: {
           extractTypes: ['headings', 'tables', 'quotes'],
-          includeHierarchy: true,
           includeSectionContext: true,
           includeMetadata: true
         }
@@ -3689,10 +3680,9 @@ console.log('code block');
       // Scenario 2: Code documentation analysis
       const codeDocumentation = {
         target: ['api-docs.md', 'readme.md', 'changelog.md'],
-        analysis: ['structure', 'elements'],
+        analysis: ['structure'],
         options: {
           extractTypes: ['headings', 'code_blocks', 'links'],
-          includeHierarchy: false,
           includeContext: true,
           contextWindow: 2
         }
@@ -3742,7 +3732,7 @@ console.log('code block');
       
       // Check all expected option properties exist
       const expectedOptions = [
-        'extractTypes', 'includeHierarchy', 'includeContext', 'includeSectionContext',
+        'extractTypes', 'includeContext', 'includeSectionContext',
         'includeMetadata', 'contextWindow', 'minHeadingLevel', 'maxHeadingLevel', 'minSectionLength'
       ];
       
@@ -3773,7 +3763,6 @@ console.log('code block');
       const optionsProperty = analyzeTool?.inputSchema.properties.options;
       
       // Check boolean defaults
-      expect(optionsProperty.properties.includeHierarchy.default).toBe(true);
       expect(optionsProperty.properties.includeContext.default).toBe(false);
       expect(optionsProperty.properties.includeSectionContext.default).toBe(true);
       expect(optionsProperty.properties.includeMetadata.default).toBe(true);

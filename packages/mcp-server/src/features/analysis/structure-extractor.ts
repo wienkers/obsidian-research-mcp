@@ -13,7 +13,6 @@ export interface StructureElement {
   level?: number; // For headings and lists
   language?: string; // For code blocks
   completed?: boolean; // For tasks
-  raw: string; // Original markdown text
   context?: {
     precedingText?: string;
     followingText?: string;
@@ -24,8 +23,7 @@ export interface StructureElement {
 export interface FileStructure {
   path: string;
   title: string;
-  elements: StructureElement[];
-  hierarchy?: StructureHierarchy;
+  hierarchy: StructureHierarchy;
   summary: {
     totalElements: number;
     byType: Record<ExtractType, number>;
@@ -144,7 +142,17 @@ export class StructureExtractor {
     const lines = content.split('\n');
 
     // Extract different types of structural elements
-    for (const extractType of options.extractTypes) {
+    // Note: Extract tasks BEFORE lists to avoid misclassification
+    const prioritizedExtractTypes = [...options.extractTypes];
+    if (prioritizedExtractTypes.includes('tasks') && prioritizedExtractTypes.includes('lists')) {
+      // Remove tasks and lists from their current positions
+      const filteredTypes = prioritizedExtractTypes.filter(t => t !== 'tasks' && t !== 'lists');
+      // Add tasks first, then lists
+      prioritizedExtractTypes.splice(0, prioritizedExtractTypes.length, ...filteredTypes);
+      prioritizedExtractTypes.unshift('tasks', 'lists');
+    }
+
+    for (const extractType of prioritizedExtractTypes) {
       switch (extractType) {
         case 'headings':
           elements.push(...this.extractHeadings(lines, options));
@@ -181,8 +189,8 @@ export class StructureExtractor {
       this.addContext(elements, lines, options.contextWindow || 2);
     }
 
-    // Build hierarchy if requested
-    const hierarchy = options.includeHierarchy ? this.buildHierarchy(elements) : undefined;
+    // Always build hierarchy
+    const hierarchy = this.buildHierarchy(elements);
 
     // Calculate summary
     const summary = this.calculateFileSummary(elements);
@@ -190,7 +198,6 @@ export class StructureExtractor {
     return {
       path,
       title: this.extractTitle(path, content),
-      elements,
       hierarchy,
       summary,
     };
@@ -211,10 +218,9 @@ export class StructureExtractor {
 
         elements.push({
           type: 'headings',
-          content: match[2].trim(),
+          content: line,
           lineNumber: index + 1,
           level,
-          raw: line,
         });
       }
     });
@@ -229,15 +235,21 @@ export class StructureExtractor {
     lines.forEach((line, index) => {
       const match = line.match(listRegex);
       if (match) {
+        // Skip lines that are tasks (contain checkbox patterns)
+        // This prevents tasks from being misclassified as lists
+        const content = match[3];
+        if (content.match(/^\[([^\]]*)\]\s/)) {
+          return; // Skip task lines
+        }
+        
         const indentation = match[1].length;
         const level = Math.floor(indentation / 2) + 1; // Assuming 2-space indentation
         
         elements.push({
           type: 'lists',
-          content: match[3].trim(),
+          content: line,
           lineNumber: index + 1,
           level,
-          raw: line,
         });
       }
     });
@@ -265,10 +277,9 @@ export class StructureExtractor {
           inCodeBlock = false;
           elements.push({
             type: 'code_blocks',
-            content: codeBlockContent.join('\n'),
+            content: `\`\`\`${language}\n${codeBlockContent.join('\n')}\n\`\`\``,
             lineNumber: codeBlockStart,
             language: language || undefined,
-            raw: `\`\`\`${language}\n${codeBlockContent.join('\n')}\n\`\`\``,
           });
         }
       } else if (inCodeBlock) {
@@ -281,26 +292,46 @@ export class StructureExtractor {
 
   private extractTasks(lines: string[], options: StructureExtractionOptions): StructureElement[] {
     const elements: StructureElement[] = [];
-    const taskRegex = /^(\s*)([-*+])\s+\[([ xX])\]\s+(.+)$/;
+    // Updated regex to capture any checkbox state, not just [ ], [x], [X]
+    const taskRegex = /^(\s*)([-*+])\s+\[([^\]]*)\]\s+(.+)$/;
 
     lines.forEach((line, index) => {
       const match = line.match(taskRegex);
       if (match) {
-        const completed = match[3].toLowerCase() === 'x';
+        const taskState = match[3];
+        const completed = this.isTaskCompleted(taskState);
         const level = Math.floor(match[1].length / 2) + 1;
         
         elements.push({
           type: 'tasks',
-          content: match[4].trim(),
+          content: line,
           lineNumber: index + 1,
           level,
           completed,
-          raw: line,
         });
       }
     });
 
     return elements;
+  }
+
+  /**
+   * Determine if a task is completed based on its checkbox state
+   */
+  private isTaskCompleted(taskState: string): boolean {
+    // Standard completed states
+    if (taskState.toLowerCase() === 'x') {
+      return true;
+    }
+    
+    // Extended completed states (some systems use these as "done")
+    const completedStates = ['✓', '✔', '✅', 'done', 'DONE'];
+    if (completedStates.includes(taskState)) {
+      return true;
+    }
+    
+    // All other states (including ' ', '/', '?', '!', etc.) are considered incomplete
+    return false;
   }
 
   private extractQuotes(lines: string[], options: StructureExtractionOptions): StructureElement[] {
@@ -315,14 +346,13 @@ export class StructureExtractor {
         if (currentQuote.length === 0) {
           quoteStart = index + 1;
         }
-        currentQuote.push(match[1]);
+        currentQuote.push(line);
       } else if (currentQuote.length > 0) {
         // End of quote block
         elements.push({
           type: 'quotes',
           content: currentQuote.join('\n'),
           lineNumber: quoteStart,
-          raw: currentQuote.map(q => `> ${q}`).join('\n'),
         });
         currentQuote = [];
       }
@@ -334,7 +364,6 @@ export class StructureExtractor {
         type: 'quotes',
         content: currentQuote.join('\n'),
         lineNumber: quoteStart,
-        raw: currentQuote.map(q => `> ${q}`).join('\n'),
       });
     }
 
@@ -364,7 +393,6 @@ export class StructureExtractor {
             type: 'tables',
             content: tableContent.join('\n'),
             lineNumber: tableStart,
-            raw: tableContent.join('\n'),
           });
         }
         inTable = false;
@@ -378,7 +406,6 @@ export class StructureExtractor {
         type: 'tables',
         content: tableContent.join('\n'),
         lineNumber: tableStart,
-        raw: tableContent.join('\n'),
       });
     }
 
@@ -454,9 +481,8 @@ export class StructureExtractor {
       while ((match = wikiLinkRegex.exec(line)) !== null) {
         elements.push({
           type: 'links',
-          content: match[1],
+          content: match[0],
           lineNumber: index + 1,
-          raw: match[0],
         });
       }
 
@@ -464,9 +490,8 @@ export class StructureExtractor {
       while ((match = markdownLinkRegex.exec(line)) !== null) {
         elements.push({
           type: 'links',
-          content: `${match[1]} -> ${match[2]}`,
+          content: match[0],
           lineNumber: index + 1,
-          raw: match[0],
         });
       }
     });
@@ -483,9 +508,8 @@ export class StructureExtractor {
       while ((match = embedRegex.exec(line)) !== null) {
         elements.push({
           type: 'embeds',
-          content: match[1],
+          content: match[0],
           lineNumber: index + 1,
-          raw: match[0],
         });
       }
     });
@@ -517,7 +541,7 @@ export class StructureExtractor {
         const line = lines[i];
         const headingMatch = line.match(/^(#{1,6})\s+(.+)$/);
         if (headingMatch && (!element.level || headingMatch[1].length < element.level)) {
-          parentHeading = headingMatch[2].trim();
+          parentHeading = headingMatch[0].trim();
           break;
         }
       }
@@ -534,12 +558,52 @@ export class StructureExtractor {
     const sections: StructureHierarchy['sections'] = [];
     const headings = elements.filter(e => e.type === 'headings');
     
+    // Handle documents with no headings - create a virtual root section
+    if (headings.length === 0) {
+      const nonHeadingElements = elements.filter(e => e.type !== 'headings');
+      if (nonHeadingElements.length > 0) {
+        sections.push({
+          heading: {
+            type: 'headings',
+            content: 'Document Content',
+            lineNumber: 1,
+            level: 1,
+          },
+          level: 1,
+          children: nonHeadingElements,
+          subsections: [],
+        });
+      }
+      return { sections };
+    }
+    
     let currentSections: Array<{
       heading: StructureElement;
       level: number;
       children: StructureElement[];
       subsections: StructureHierarchy['sections'];
     }> = [];
+
+    // Handle elements before first heading
+    if (headings.length > 0) {
+      const firstHeadingIndex = elements.indexOf(headings[0]);
+      const elementsBeforeFirstHeading = elements.slice(0, firstHeadingIndex)
+        .filter(e => e.type !== 'headings');
+      
+      if (elementsBeforeFirstHeading.length > 0) {
+        sections.push({
+          heading: {
+            type: 'headings',
+            content: 'Preamble',
+            lineNumber: 1,
+            level: 1,
+          },
+          level: 1,
+          children: elementsBeforeFirstHeading,
+          subsections: [],
+        });
+      }
+    }
 
     for (const heading of headings) {
       const level = heading.level || 1;
@@ -642,8 +706,21 @@ export class StructureExtractor {
         byType[type as ExtractType] += count;
       }
 
-      // Collect common patterns
-      for (const element of file.elements) {
+      // Collect common patterns from hierarchy
+      const extractElementsFromHierarchy = (sections: StructureHierarchy['sections']): StructureElement[] => {
+        const elements: StructureElement[] = [];
+        for (const section of sections) {
+          elements.push(section.heading);
+          elements.push(...section.children);
+          if (section.subsections.length > 0) {
+            elements.push(...extractElementsFromHierarchy(section.subsections));
+          }
+        }
+        return elements;
+      };
+
+      const elements = extractElementsFromHierarchy(file.hierarchy.sections);
+      for (const element of elements) {
         if (element.type === 'headings' || element.type === 'lists') {
           const pattern = `${element.type}:level-${element.level}`;
           patterns.set(pattern, (patterns.get(pattern) || 0) + 1);

@@ -171,6 +171,99 @@ describe('ObsidianResearchServer - obsidian_manage implementation', () => {
       const response = JSON.parse(result.content[0].text);
       expect(response.success).toBe(true);
     });
+
+    it('should never create backup files during copy operations', async () => {
+      const { obsidianAPI } = await import('../../../../src/integrations/obsidian-api.js');
+      
+      // Reset mocks completely
+      vi.clearAllMocks();
+      (obsidianAPI.getFileContent as any).mockReset();
+      (obsidianAPI.createFile as any).mockReset();
+      
+      // Set up correct mock behavior for successful copy:
+      // 1. First call: get source content (succeeds)
+      // 2. Second call: check if target exists (fails - file not found)
+      (obsidianAPI.getFileContent as any)
+        .mockImplementationOnce(() => Promise.resolve('Source content')) // Source file exists
+        .mockImplementationOnce(() => Promise.reject(new Error('File not found'))); // Target doesn't exist
+      
+      (obsidianAPI.createFile as any).mockResolvedValue(undefined);
+
+      const result = await (server as any).handleConsolidatedManage({
+        operation: 'copy',
+        source: 'source.md',
+        target: 'new-target.md',
+        parameters: { overwrite: false },
+        options: { createBackup: true } // This should be ignored for copy operations
+      });
+
+      const response = JSON.parse(result.content[0].text);
+
+      // Debug: Check what actually happened
+      console.log('Test 1 Response:', JSON.stringify(response, null, 2));
+
+      // Verify operation succeeded
+      expect(response.success).toBe(true);
+      expect(response.operation).toBe('copy');
+      
+      // Verify only ONE call to createFile (for the actual copy, not backup)
+      expect(obsidianAPI.createFile).toHaveBeenCalledTimes(1);
+      expect(obsidianAPI.createFile).toHaveBeenCalledWith('new-target.md', 'Source content');
+
+      // Ensure no backup files with timestamp pattern were created
+      const createFileCalls = (obsidianAPI.createFile as any).mock.calls;
+      for (const call of createFileCalls) {
+        const [filePath] = call;
+        expect(filePath).not.toMatch(/\.backup\.\d+$/);
+      }
+    });
+
+    it('should never execute delete operation logic during copy operations', async () => {
+      const { obsidianAPI } = await import('../../../../src/integrations/obsidian-api.js');
+      
+      // Reset mocks completely
+      vi.clearAllMocks();
+      (obsidianAPI.getFileContent as any).mockReset();
+      (obsidianAPI.createFile as any).mockReset();
+      (obsidianAPI.deleteFile as any).mockReset();
+      
+      // Mock source content retrieval and target doesn't exist
+      (obsidianAPI.getFileContent as any)
+        .mockImplementationOnce(() => Promise.resolve('Source content')) // Source exists
+        .mockImplementationOnce(() => Promise.reject(new Error('File not found'))); // Target doesn't exist
+      
+      (obsidianAPI.createFile as any).mockResolvedValue(undefined);
+      (obsidianAPI.deleteFile as any).mockResolvedValue(undefined);
+
+      // Spy on cleanupLinksAfterDelete to ensure it's never called
+      const cleanupSpy = vi.spyOn(server as any, 'cleanupLinksAfterDelete').mockResolvedValue({
+        linksCleanedUp: 0,
+        filesUpdated: 0,
+        updatedFiles: []
+      });
+
+      const result = await (server as any).handleConsolidatedManage({
+        operation: 'copy',
+        source: 'source.md',
+        target: 'target.md'
+      });
+
+      // Verify delete-related operations were never called
+      expect(obsidianAPI.deleteFile).not.toHaveBeenCalled();
+      expect(cleanupSpy).not.toHaveBeenCalled();
+
+      // Verify only copy-related operations were called
+      expect(obsidianAPI.getFileContent).toHaveBeenCalledWith('source.md'); // Source read
+      expect(obsidianAPI.createFile).toHaveBeenCalledWith('target.md', 'Source content'); // Target create
+
+      const response = JSON.parse(result.content[0].text);
+      
+      // Debug: Check what actually happened
+      console.log('Test 2 Response:', JSON.stringify(response, null, 2));
+      
+      expect(response.success).toBe(true);
+      expect(response.operation).toBe('copy');
+    });
   });
 
   describe('handleConsolidatedManage - Delete Operations', () => {
@@ -306,6 +399,150 @@ describe('ObsidianResearchServer - obsidian_manage implementation', () => {
       const response = JSON.parse(result.content[0].text);
       expect(response.success).toBe(false);
       expect(response.error).toContain('Replacements array is required');
+    });
+
+    describe('Case Preservation', () => {
+      it('should preserve case when preserveCase is enabled (default)', async () => {
+        const { obsidianAPI } = await import('../../../../src/integrations/obsidian-api.js');
+        
+        // Mock file listing to return one test file
+        (obsidianAPI.listFiles as any).mockResolvedValue([
+          { path: 'test.md', isFolder: false }
+        ]);
+        
+        // Mock file content with different case variations
+        const originalContent = 'Content is important. The content matters. CONTENT EVERYWHERE.';
+        (obsidianAPI.getFileContent as any).mockResolvedValue(originalContent);
+        (obsidianAPI.updateFileContent as any).mockResolvedValue(undefined);
+
+        const result = await (server as any).handleConsolidatedManage({
+          operation: 'find-replace',
+          source: 'vault',
+          parameters: {
+            replacements: [
+              { search: 'content', replace: 'material' }
+            ],
+            caseSensitive: false,
+            preserveCase: true // Explicitly test default behavior
+          }
+        });
+
+        const response = JSON.parse(result.content[0].text);
+        expect(response.success).toBe(true);
+        expect(response.totalReplacements).toBe(3);
+
+        // Verify the replacement preserved case patterns
+        const updateCall = (obsidianAPI.updateFileContent as any).mock.calls[0];
+        const updatedContent = updateCall[1];
+        
+        // Check that case was preserved for each variation
+        expect(updatedContent).toContain('Material is important'); // Content -> Material
+        expect(updatedContent).toContain('The material matters'); // content -> material  
+        expect(updatedContent).toContain('MATERIAL EVERYWHERE'); // CONTENT -> MATERIAL
+      });
+
+      it('should not preserve case when preserveCase is disabled', async () => {
+        const { obsidianAPI } = await import('../../../../src/integrations/obsidian-api.js');
+        
+        (obsidianAPI.listFiles as any).mockResolvedValue([
+          { path: 'test.md', isFolder: false }
+        ]);
+        
+        const originalContent = 'Content is important. The content matters.';
+        (obsidianAPI.getFileContent as any).mockResolvedValue(originalContent);
+        (obsidianAPI.updateFileContent as any).mockResolvedValue(undefined);
+
+        const result = await (server as any).handleConsolidatedManage({
+          operation: 'find-replace',
+          source: 'vault',
+          parameters: {
+            replacements: [
+              { search: 'content', replace: 'material' }
+            ],
+            caseSensitive: false,
+            preserveCase: false // Disable case preservation
+          }
+        });
+
+        const response = JSON.parse(result.content[0].text);
+        expect(response.success).toBe(true);
+
+        // Verify case was NOT preserved (all became lowercase)
+        const updateCall = (obsidianAPI.updateFileContent as any).mock.calls[0];
+        const updatedContent = updateCall[1];
+        
+        expect(updatedContent).toContain('material is important'); // Content -> material (not Material)
+        expect(updatedContent).toContain('The material matters'); // content -> material
+      });
+
+      it('should not apply case preservation when caseSensitive is true', async () => {
+        const { obsidianAPI } = await import('../../../../src/integrations/obsidian-api.js');
+        
+        (obsidianAPI.listFiles as any).mockResolvedValue([
+          { path: 'test.md', isFolder: false }
+        ]);
+        
+        const originalContent = 'content is important. Content matters.';
+        (obsidianAPI.getFileContent as any).mockResolvedValue(originalContent);
+        (obsidianAPI.updateFileContent as any).mockResolvedValue(undefined);
+
+        const result = await (server as any).handleConsolidatedManage({
+          operation: 'find-replace',
+          source: 'vault',
+          parameters: {
+            replacements: [
+              { search: 'content', replace: 'material' } // Only matches lowercase
+            ],
+            caseSensitive: true,
+            preserveCase: true // Should be ignored when caseSensitive=true
+          }
+        });
+
+        const response = JSON.parse(result.content[0].text);
+        expect(response.success).toBe(true);
+        expect(response.totalReplacements).toBe(1); // Only lowercase match
+
+        const updateCall = (obsidianAPI.updateFileContent as any).mock.calls[0];
+        const updatedContent = updateCall[1];
+        
+        expect(updatedContent).toContain('material is important'); // lowercase content -> material
+        expect(updatedContent).toContain('Content matters'); // Content unchanged (no match)
+      });
+
+      it('should work with regex patterns and case preservation', async () => {
+        const { obsidianAPI } = await import('../../../../src/integrations/obsidian-api.js');
+        
+        (obsidianAPI.listFiles as any).mockResolvedValue([
+          { path: 'test.md', isFolder: false }
+        ]);
+        
+        const originalContent = 'Target-123 and target-456 and TARGET-789';
+        (obsidianAPI.getFileContent as any).mockResolvedValue(originalContent);
+        (obsidianAPI.updateFileContent as any).mockResolvedValue(undefined);
+
+        const result = await (server as any).handleConsolidatedManage({
+          operation: 'find-replace',
+          source: 'vault',
+          parameters: {
+            replacements: [
+              { search: 'target', replace: 'reference' }
+            ],
+            useRegex: false, // Use literal string search
+            caseSensitive: false,
+            preserveCase: true
+          }
+        });
+
+        const response = JSON.parse(result.content[0].text);
+        expect(response.success).toBe(true);
+
+        const updateCall = (obsidianAPI.updateFileContent as any).mock.calls[0];
+        const updatedContent = updateCall[1];
+        
+        expect(updatedContent).toContain('Reference-123'); // Target -> Reference
+        expect(updatedContent).toContain('reference-456'); // target -> reference
+        expect(updatedContent).toContain('REFERENCE-789'); // TARGET -> REFERENCE
+      });
     });
   });
 

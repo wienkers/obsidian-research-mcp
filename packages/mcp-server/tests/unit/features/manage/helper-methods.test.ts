@@ -302,7 +302,7 @@ describe('ObsidianResearchServer - Helper Methods', () => {
       );
     });
 
-    it('should perform case-insensitive replacement', async () => {
+    it('should perform case-insensitive replacement with case preservation', async () => {
       const { obsidianAPI } = await import('../../../../src/integrations/obsidian-api.js');
       
       (obsidianAPI.listFiles as any).mockResolvedValue([
@@ -316,15 +316,45 @@ describe('ObsidianResearchServer - Helper Methods', () => {
         replacements: [{ search: 'test', replace: 'example' }],
         useRegex: false,
         caseSensitive: false
+        // preserveCase: true by default
       };
 
       const result = await (server as any).performFindReplace(parameters, {});
 
       expect(result.totalReplacements).toBe(3);
       
+      // Case preservation should maintain original case patterns
       expect(obsidianAPI.updateFileContent).toHaveBeenCalledWith(
         'case-test.md',
-        'example and example and example'
+        'Example and example and EXAMPLE' // Case preserved: Test->Example, test->example, TEST->EXAMPLE
+      );
+    });
+
+    it('should perform case-insensitive replacement without case preservation when disabled', async () => {
+      const { obsidianAPI } = await import('../../../../src/integrations/obsidian-api.js');
+      
+      (obsidianAPI.listFiles as any).mockResolvedValue([
+        { path: 'case-test.md', isFolder: false }
+      ]);
+
+      (obsidianAPI.getFileContent as any).mockResolvedValue('Test and test and TEST');
+      (obsidianAPI.updateFileContent as any).mockResolvedValue(undefined);
+
+      const parameters = {
+        replacements: [{ search: 'test', replace: 'example' }],
+        useRegex: false,
+        caseSensitive: false,
+        preserveCase: false // Disable case preservation
+      };
+
+      const result = await (server as any).performFindReplace(parameters, {});
+
+      expect(result.totalReplacements).toBe(3);
+      
+      // Without case preservation, all become lowercase
+      expect(obsidianAPI.updateFileContent).toHaveBeenCalledWith(
+        'case-test.md',
+        'example and example and example' // All lowercase
       );
     });
 
@@ -389,7 +419,7 @@ describe('ObsidianResearchServer - Helper Methods', () => {
       expect(obsidianAPI.listFiles).toHaveBeenCalledWith('folder2', true);
     });
 
-    it('should handle multiple replacements in single file', async () => {
+    it('should handle multiple replacements in single file with case preservation', async () => {
       const { obsidianAPI } = await import('../../../../src/integrations/obsidian-api.js');
       
       (obsidianAPI.listFiles as any).mockResolvedValue([
@@ -404,6 +434,7 @@ describe('ObsidianResearchServer - Helper Methods', () => {
           { search: 'this', replace: 'THAT' },
           { search: 'that', replace: 'THIS' }
         ]
+        // preserveCase: true by default, caseSensitive: false by default
       };
 
       const result = await (server as any).performFindReplace(parameters, {});
@@ -411,9 +442,42 @@ describe('ObsidianResearchServer - Helper Methods', () => {
       expect(result.totalReplacements).toBe(3);
       expect(result.filesUpdated).toBe(1);
 
+      // Case preservation: "this" -> "that", but then "that" (from original) -> "this"
+      // So both "this" and "that" become "this" (since "that" was already present originally)
       expect(obsidianAPI.updateFileContent).toHaveBeenCalledWith(
         'multi.md',
-        'Replace THIS and also THIS.'
+        'Replace this and also this.'
+      );
+    });
+
+    it('should handle multiple replacements without case preservation', async () => {
+      const { obsidianAPI } = await import('../../../../src/integrations/obsidian-api.js');
+      
+      (obsidianAPI.listFiles as any).mockResolvedValue([
+        { path: 'multi.md', isFolder: false }
+      ]);
+
+      (obsidianAPI.getFileContent as any).mockResolvedValue('Replace this and also that.');
+      (obsidianAPI.updateFileContent as any).mockResolvedValue(undefined);
+
+      const parameters = {
+        replacements: [
+          { search: 'this', replace: 'THAT' },
+          { search: 'that', replace: 'THIS' }
+        ],
+        preserveCase: false // Disable case preservation
+      };
+
+      const result = await (server as any).performFindReplace(parameters, {});
+
+      expect(result.totalReplacements).toBe(3);
+      expect(result.filesUpdated).toBe(1);
+
+      // Without case preservation, replacements use replacement text as-is (lowercase logic applied)
+      // Actually it should be using the exact replacement case without case preservation
+      expect(obsidianAPI.updateFileContent).toHaveBeenCalledWith(
+        'multi.md',
+        'Replace THIS and also THIS.' // Should use replacement text as-is when preserveCase=false
       );
     });
 

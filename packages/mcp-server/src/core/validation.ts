@@ -139,14 +139,29 @@ export const ValidationSchemas = {
       folder: PathSchema.optional(),
       recursive: z.boolean().default(false)
     }).optional(),
+    filters: z.object({
+      extensions: z.array(z.string().min(1)).optional(),
+      namePattern: z.string().optional(),
+      dateRange: z.object({
+        start: z.string().datetime().optional(),
+        end: z.string().datetime().optional()
+      }).optional(),
+      excludePatterns: z.array(z.string()).optional()
+    }).optional(),
     options: z.object({
       limit: z.number().int().min(1).default(100)
     }).optional()
   }),
 
   ConsolidatedRelationships: z.object({
-    target: PathSchema,
-    analysis: z.array(z.enum(['backlinks'])).default(['backlinks'])
+    target: z.union([
+      PathSchema,
+      z.array(PathSchema)
+    ]),
+    relationshipTypes: z.array(z.enum(['backlinks', 'links', 'tags', 'mentions', 'embeds', 'all'])).default(['backlinks']),
+    includeContext: z.boolean().default(true),
+    maxResults: z.number().int().min(1).max(500).optional(),
+    strengthThreshold: z.number().min(0).max(1).default(0.0)
   }),
 
   ConsolidatedAnalyze: z.object({
@@ -171,7 +186,6 @@ export const ValidationSchemas = {
     ])).optional(),
     options: z.object({
       extractTypes: z.array(z.enum(['headings', 'lists', 'code_blocks', 'tasks', 'quotes', 'tables', 'links', 'embeds'])).default(['headings']),
-      includeHierarchy: z.boolean().default(true),
       includeContext: z.boolean().default(false),
       includeSectionContext: z.boolean().default(true),
       includeMetadata: z.boolean().default(true),

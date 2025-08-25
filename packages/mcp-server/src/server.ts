@@ -6,7 +6,7 @@ import {
   ListPromptsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 
-import { CONSOLIDATED_OBSIDIAN_TOOLS, validateSemanticSearchParams, validatePatternSearchParams, validateTargetInput } from './tools/consolidated-tools.js';
+import { CONSOLIDATED_OBSIDIAN_TOOLS, validateSemanticSearchParams, validatePatternSearchParams, validateTargetInput, validateWriteContentParams } from './tools/consolidated-tools.js';
 import { hybridSearchEngine } from './features/search/hybrid-search.js';
 import { backlinkIndex } from './features/search/backlink-index.js';
 import { batchReader } from './features/batch-operations/batch-reader.js';
@@ -417,7 +417,6 @@ export class ObsidianResearchServer {
         };
         
         if (includeStat && rawStats && formattedStats) {
-          result.stat = rawStats;
           result.formattedStat = formattedStats;
         }
         
@@ -464,7 +463,6 @@ export class ObsidianResearchServer {
           if (includeStat) {
             try {
               const stats = await this.getFileStatistics(note.path);
-              noteResult.stat = stats.rawStats;
               noteResult.formattedStat = {
                 ...stats.formattedStats,
                 tokenCountEstimate: this.estimateTokenCount(note.content || '')
@@ -523,6 +521,9 @@ export class ObsidianResearchServer {
   }
 
   private async handleConsolidatedWriteNote(args: any) {
+    // Additional validation specific to write content operations
+    const validatedArgs = validateWriteContentParams(args);
+    
     const { 
       targetType = 'path', 
       targetIdentifier, 
@@ -530,7 +531,7 @@ export class ObsidianResearchServer {
       mode = 'whole-file', 
       wholeFileMode = 'overwrite', 
       relativeMode 
-    } = args;
+    } = validatedArgs;
     
     let targetPath: string;
     
@@ -574,7 +575,21 @@ export class ObsidianResearchServer {
         case 'prepend':
           try {
             const existingContent = await obsidianAPI.getFileContent(targetPath);
-            finalContent = content + '\n' + existingContent;
+            
+            // Parse frontmatter boundary to preserve YAML frontmatter
+            const { hasFrontmatter, frontmatterEndIndex } = parseFrontmatterBoundary(existingContent);
+            
+            if (hasFrontmatter) {
+              // Insert content after frontmatter block
+              const frontmatter = existingContent.substring(0, frontmatterEndIndex);
+              const bodyContent = existingContent.substring(frontmatterEndIndex);
+              
+              // Ensure proper spacing: frontmatter + newline + prepended content + newline + existing body
+              finalContent = frontmatter + '\n\n' + content + '\n' + bodyContent;
+            } else {
+              // No frontmatter, use simple prepend
+              finalContent = content + '\n' + existingContent;
+            }
           } catch (error) {
             // File doesn't exist, create with content
             finalContent = content;
@@ -610,7 +625,7 @@ export class ObsidianResearchServer {
       // Block reference operations are not supported
       if (relativeTargetType === 'block') {
         throw new LoggedError(
-          `Block reference operations are not supported. Use targetType "heading" or "frontmatter" instead.`
+          `Block reference operations are not supported. Use targetType "heading", "frontmatter", or "line_range" instead.`
         );
       }
       
@@ -641,7 +656,8 @@ export class ObsidianResearchServer {
     const { mode = 'list', scope = {}, filters = {}, options = {} } = args;
     
     // Use obsidianAPI directly for exploration
-    let files = await obsidianAPI.listFiles(scope.folder, scope.recursive);
+    const { folder, recursive = true } = scope;
+    let files = await obsidianAPI.listFiles(folder, recursive, true);
     
     // Apply filters to the file list
     files = this.applyExploreFilters(files, filters);
@@ -673,22 +689,42 @@ export class ObsidianResearchServer {
           type: 'text',
           text: JSON.stringify({
             mode,
-            files: files.slice(0, options.limit || 100).map(f => {
-              // Only include name if it differs from filename in path
-              const filename = f.path.split('/').pop() || '';
+            files: await Promise.all(files.slice(0, options.limit || 100).map(async f => {
+              // Normalize folder paths to ensure single trailing slash
+              const normalizedPath = f.isFolder 
+                ? (f.path.endsWith('/') ? f.path : f.path + '/')
+                : f.path;
+              
+              // Extract basename from path for comparison
+              const filename = normalizedPath.split('/').filter(part => part.length > 0).pop() || '';
               const resultObj: any = {
-                path: f.isFolder ? f.path + '/' : f.path,
-                mtime: f.mtime,
-                size: f.size
+                path: normalizedPath,
+                mtime: f.mtime ? this.formatTimestamp(f.mtime) : 'No timestamp',
+                ctime: f.ctime ? this.formatTimestamp(f.ctime) : 'No timestamp',
+                size: f.size,
               };
+
+              // Add content statistics for text files
+              if (!f.isFolder && this.isTextFile(f)) {
+                try {
+                  const contentStats = await this.getContentStats(f.path);
+                  resultObj.contentStats = contentStats;
+                } catch (error) {
+                  logger.debug('Failed to get content stats for file', { path: f.path, error });
+                }
+              }
+              
+              // For directories, compare name without trailing slash
+              // For files, compare name as-is
+              const nameToCompare = f.isFolder ? f.name.replace(/\/$/, '') : f.name;
               
               // Add name only if it's different from filename
-              if (f.name !== filename) {
+              if (nameToCompare !== filename) {
                 resultObj.name = f.name;
               }
               
               return resultObj;
-            }),
+            })),
             totalFiles: files.length,
             scope,
             filters,
@@ -699,13 +735,132 @@ export class ObsidianResearchServer {
     }
   }
 
+  private getFileType(file: any): string {
+    if (file.isFolder) {
+      return 'folder';
+    }
+
+    const extension = file.path.split('.').pop()?.toLowerCase() || '';
+    
+    // Define file type mappings
+    const typeMap: Record<string, string> = {
+      // Text files
+      'md': 'markdown',
+      'txt': 'text',
+      'rtf': 'text',
+      'json': 'json',
+      'xml': 'xml',
+      'yaml': 'yaml',
+      'yml': 'yaml',
+      
+      // Code files
+      'js': 'javascript',
+      'ts': 'typescript',
+      'py': 'python',
+      'java': 'java',
+      'cpp': 'cpp',
+      'c': 'c',
+      'cs': 'csharp',
+      'php': 'php',
+      'rb': 'ruby',
+      'go': 'go',
+      'rs': 'rust',
+      'html': 'html',
+      'css': 'css',
+      'scss': 'scss',
+      'sass': 'sass',
+      
+      // Images
+      'png': 'image',
+      'jpg': 'image',
+      'jpeg': 'image',
+      'gif': 'image',
+      'svg': 'image',
+      'webp': 'image',
+      'ico': 'image',
+      'bmp': 'image',
+      
+      // Documents
+      'pdf': 'pdf',
+      'doc': 'document',
+      'docx': 'document',
+      'odt': 'document',
+      'xls': 'spreadsheet',
+      'xlsx': 'spreadsheet',
+      'ods': 'spreadsheet',
+      'ppt': 'presentation',
+      'pptx': 'presentation',
+      'odp': 'presentation',
+      
+      // Archives
+      'zip': 'archive',
+      'rar': 'archive',
+      'tar': 'archive',
+      'gz': 'archive',
+      '7z': 'archive',
+      
+      // Audio/Video
+      'mp3': 'audio',
+      'wav': 'audio',
+      'flac': 'audio',
+      'ogg': 'audio',
+      'mp4': 'video',
+      'avi': 'video',
+      'mkv': 'video',
+      'mov': 'video',
+      'wmv': 'video',
+    };
+
+    return typeMap[extension] || 'unknown';
+  }
+
+  private isTextFile(file: any): boolean {
+    if (file.isFolder) {
+      return false;
+    }
+
+    const textTypes = ['markdown', 'text', 'json', 'xml', 'yaml', 'javascript', 'typescript', 'python', 'java', 'cpp', 'c', 'csharp', 'php', 'ruby', 'go', 'rust', 'html', 'css', 'scss', 'sass'];
+    return textTypes.includes(this.getFileType(file));
+  }
+
+  private async getContentStats(filePath: string): Promise<{wordCount: number, lineCount: number, charCount: number}> {
+    try {
+      const note = await obsidianAPI.getNote(filePath);
+      const content = note.content;
+      
+      const charCount = content.length;
+      const lineCount = content.split('\n').length;
+      const wordCount = content.trim().split(/\s+/).filter((word: string) => word.length > 0).length;
+      
+      return {
+        wordCount,
+        lineCount, 
+        charCount
+      };
+    } catch (error) {
+      logger.debug('Failed to calculate content stats', { filePath, error });
+      return {
+        wordCount: 0,
+        lineCount: 0,
+        charCount: 0
+      };
+    }
+  }
+
   private applyExploreFilters(files: any[], filters: any): any[] {
     let filteredFiles = files;
+
+    // Handle null/undefined filters
+    if (!filters) {
+      return filteredFiles;
+    }
 
     // Filter by extensions
     if (filters.extensions && Array.isArray(filters.extensions) && filters.extensions.length > 0) {
       filteredFiles = filteredFiles.filter(file => {
-        if (file.isFolder) return true; // Always include folders
+        // Only include folders if they might contain matching files (for navigation)
+        // But when extensions are specified, we primarily want matching files
+        if (file.isFolder) return false; // Exclude folders when extension filtering is active
         const fileExt = file.name.split('.').pop()?.toLowerCase();
         return filters.extensions.some((ext: string) => ext.toLowerCase() === fileExt);
       });
@@ -715,12 +870,31 @@ export class ObsidianResearchServer {
     if (filters.namePattern && typeof filters.namePattern === 'string') {
       try {
         const nameRegex = new RegExp(filters.namePattern, 'i');
-        filteredFiles = filteredFiles.filter(file => nameRegex.test(file.name));
+        logger.debug('Applying name pattern filter', { 
+          pattern: filters.namePattern, 
+          totalFiles: filteredFiles.length 
+        });
+        
+        filteredFiles = filteredFiles.filter(file => {
+          const matches = nameRegex.test(file.name);
+          logger.debug('Name pattern test', { 
+            fileName: file.name, 
+            pattern: filters.namePattern, 
+            matches 
+          });
+          return matches;
+        });
+        
+        logger.debug('Name pattern filter result', { 
+          pattern: filters.namePattern,
+          filesRemaining: filteredFiles.length 
+        });
       } catch (error) {
         logger.warn('Invalid namePattern regex in explore filters', { 
           pattern: filters.namePattern, 
           error: error instanceof Error ? error.message : String(error) 
         });
+        // Don't filter if regex is invalid - return current filtered files
       }
     }
 
@@ -730,7 +904,8 @@ export class ObsidianResearchServer {
       
       if (start || end) {
         filteredFiles = filteredFiles.filter(file => {
-          if (!file.mtime) return true; // Include files without mtime info
+          // When date range filtering is active, exclude files without mtime info
+          if (!file.mtime) return false;
           
           const fileDate = new Date(file.mtime);
           let includeFile = true;
@@ -741,6 +916,7 @@ export class ObsidianResearchServer {
               if (fileDate < startDate) includeFile = false;
             } catch (error) {
               logger.warn('Invalid start date in dateRange filter', { start, error });
+              return false; // Exclude files with invalid start date processing
             }
           }
           
@@ -750,6 +926,7 @@ export class ObsidianResearchServer {
               if (fileDate > endDate) includeFile = false;
             } catch (error) {
               logger.warn('Invalid end date in dateRange filter', { end, error });
+              return false; // Exclude files with invalid end date processing
             }
           }
           
@@ -809,91 +986,168 @@ export class ObsidianResearchServer {
         for (const relType of types) {
           let typeRelationships: any[] = [];
           
-          switch (relType) {
-            case 'backlinks':
-              if (includeContext) {
-                const backlinkRels = await backlinkIndex.getBacklinkRelationships(filePath);
-                typeRelationships = backlinkRels.map(rel => ({
-                  type: 'backlinks',
-                  targetPath: rel.source,
-                  targetTitle: this.extractBasename(rel.source),
-                  strength: this.calculateLinkStrength(rel.contexts),
-                  context: rel.contexts.map(c => c.text).join(' | '),
-                  lineNumber: rel.contexts[0]?.line || 0,
-                  bidirectional: false
-                }));
-              } else {
-                const backlinks = await backlinkIndex.getBacklinks(filePath);
-                typeRelationships = backlinks.map(path => ({
-                  type: 'backlinks',
-                  targetPath: path,
-                  targetTitle: this.extractBasename(path),
-                  strength: 1.0,
-                  context: null,
-                  lineNumber: 0,
-                  bidirectional: false
-                }));
+          try {
+            switch (relType) {
+              case 'backlinks':
+                if (includeContext) {
+                  const backlinkRels = await backlinkIndex.getBacklinkRelationships(filePath);
+                  if (Array.isArray(backlinkRels)) {
+                    typeRelationships = [];
+                    for (const rel of backlinkRels) {
+                      // Create individual relationship for each context
+                      for (const context of rel.contexts) {
+                        typeRelationships.push({
+                          type: 'backlinks',
+                          targetPath: rel.source,
+                          ...this.formatTargetTitle(rel.source),
+                          strength: this.calculateLinkStrength([context]),
+                          context: context.text,
+                          lineNumber: context.line
+                        });
+                      }
+                    }
+                  }
+                } else {
+                  const backlinkRels = await backlinkIndex.getBacklinkRelationships(filePath);
+                  if (Array.isArray(backlinkRels)) {
+                    typeRelationships = [];
+                    for (const rel of backlinkRels) {
+                      // Create individual relationship for each context, but omit context field
+                      for (const context of rel.contexts) {
+                        typeRelationships.push({
+                          type: 'backlinks',
+                          targetPath: rel.source,
+                          ...this.formatTargetTitle(rel.source),
+                          strength: this.calculateLinkStrength([context]),
+                          lineNumber: context.line
+                        });
+                      }
+                    }
+                  }
+                }
+                break;
+                
+              case 'links': {
+                const forwardLinks = await backlinkIndex.getForwardLinks(filePath);
+                if (Array.isArray(forwardLinks)) {
+                  typeRelationships = [];
+                  for (const path of forwardLinks) {
+                    // Get all contexts for this link
+                    const contexts = await this.getAllLinkContexts(filePath, path);
+                    if (contexts.length > 0) {
+                      // Create individual relationship for each context
+                      for (const contextInfo of contexts) {
+                        const relationship: any = {
+                          type: 'links',
+                          targetPath: path,
+                          ...this.formatTargetTitle(path),
+                          strength: 1.0,
+                          lineNumber: contextInfo.lineNumber
+                        };
+                        if (includeContext) {
+                          relationship.context = contextInfo.context;
+                        }
+                        typeRelationships.push(relationship);
+                      }
+                    } else {
+                      // Fallback: create relationship without context if none found
+                      const relationship: any = {
+                        type: 'links',
+                        targetPath: path,
+                        ...this.formatTargetTitle(path),
+                        strength: 1.0,
+                        lineNumber: 0
+                      };
+                      if (includeContext) {
+                        relationship.context = null;
+                      }
+                      typeRelationships.push(relationship);
+                    }
+                  }
+                }
+                break;
               }
-              break;
-              
-            case 'links':
-              const forwardLinks = await backlinkIndex.getForwardLinks(filePath);
-              const linkPromises = forwardLinks.map(async (path) => ({
-                type: 'links',
-                targetPath: path,
-                targetTitle: this.extractBasename(path),
-                strength: 1.0,
-                context: includeContext ? await this.getLinkContext(filePath, path) : null,
-                lineNumber: 0,
-                bidirectional: false
-              }));
-              typeRelationships = await Promise.all(linkPromises);
-              break;
-              
-            case 'tags':
-              const tagRels = await backlinkIndex.getTags(filePath);
-              if (tagRels && tagRels.tags) {
-                typeRelationships = tagRels.tags.map((tag: string) => ({
-                  type: 'tags',
-                  targetPath: tag,
-                  targetTitle: tag,
-                  strength: this.calculateTagStrength(tagRels.contexts.filter((c: any) => c.tag === tag)),
-                  context: includeContext ? tagRels.contexts
-                    .filter((c: any) => c.tag === tag)
-                    .map((c: any) => c.text)
-                    .join(' | ') : null,
-                  lineNumber: tagRels.contexts.find((c: any) => c.tag === tag)?.line || 0,
-                  bidirectional: false
-                }));
+                
+              case 'tags': {
+                const tagRels = await backlinkIndex.getTags(filePath);
+                if (tagRels && Array.isArray(tagRels.tags) && Array.isArray(tagRels.contexts)) {
+                  typeRelationships = [];
+                  for (const tag of tagRels.tags) {
+                    const tagContexts = tagRels.contexts.filter((c: any) => c.tag === tag);
+                    // Create individual relationship for each context
+                    for (const context of tagContexts) {
+                      const relationship: any = {
+                        type: 'tags',
+                        targetPath: tag,
+                        strength: this.calculateTagStrength([context]),
+                        lineNumber: context.line
+                      };
+                      if (includeContext) {
+                        relationship.context = context.text;
+                      }
+                      typeRelationships.push(relationship);
+                    }
+                  }
+                }
+                break;
               }
-              break;
-              
-            case 'mentions':
-              const mentionRels = await backlinkIndex.findMentions(filePath);
-              typeRelationships = mentionRels.map((mention: any) => ({
-                type: 'mentions',
-                targetPath: mention.source,
-                targetTitle: this.extractBasename(mention.source),
-                strength: this.calculateMentionStrength(mention.contexts),
-                context: includeContext ? mention.contexts.map((c: any) => c.text).join(' | ') : null,
-                lineNumber: mention.contexts[0]?.line || 0,
-                bidirectional: false
-              }));
-              break;
-              
-            case 'embeds':
-              const embedRels = await backlinkIndex.getEmbeds(filePath);
-              typeRelationships = embedRels.map((embed: any) => ({
-                type: 'embeds',
-                targetPath: embed.target,
-                targetTitle: this.extractBasename(embed.target),
-                strength: 1.0,
-                context: includeContext ? embed.contexts.map((c: any) => c.text).join(' | ') : null,
-                lineNumber: embed.contexts[0]?.line || 0,
-                bidirectional: false,
-                embedType: embed.contexts[0]?.embedType || 'other'
-              }));
-              break;
+                
+              case 'mentions': {
+                const mentionRels = await backlinkIndex.findMentions(filePath);
+                if (Array.isArray(mentionRels)) {
+                  typeRelationships = [];
+                  for (const mention of mentionRels) {
+                    // Create individual relationship for each context
+                    for (const context of mention.contexts) {
+                      const relationship: any = {
+                        type: 'mentions',
+                        targetPath: mention.source,
+                        ...this.formatTargetTitle(mention.source),
+                        strength: this.calculateMentionStrength([context]),
+                        lineNumber: context.line
+                      };
+                      if (includeContext) {
+                        relationship.context = context.text;
+                      }
+                      typeRelationships.push(relationship);
+                    }
+                  }
+                }
+                break;
+              }
+                
+              case 'embeds': {
+                const embedRels = await backlinkIndex.getEmbeds(filePath);
+                if (Array.isArray(embedRels)) {
+                  typeRelationships = [];
+                  for (const embed of embedRels) {
+                    // Create individual relationship for each context
+                    for (const context of embed.contexts) {
+                      const relationship: any = {
+                        type: 'embeds',
+                        targetPath: embed.target,
+                        ...this.formatTargetTitle(embed.target),
+                        strength: 1.0,
+                        lineNumber: context.line,
+                        embedType: context.embedType || 'other'
+                      };
+                      if (includeContext) {
+                        relationship.context = context.text;
+                      }
+                      typeRelationships.push(relationship);
+                    }
+                  }
+                }
+                break;
+              }
+            }
+          } catch (error) {
+            logger.warn(`Failed to analyze ${relType} relationships for ${filePath}`, { 
+              relationshipType: relType,
+              error: error instanceof Error ? error.message : String(error) 
+            });
+            // Continue with empty results for this relationship type
+            typeRelationships = [];
           }
           
           // Apply strength threshold and maxResults filtering
@@ -910,7 +1164,7 @@ export class ObsidianResearchServer {
         
         fileRelationships.push({
           path: filePath,
-          title: fileTitle,
+          ...(fileTitle !== this.extractBasename(filePath) ? { title: fileTitle } : {}),
           summary: {
             totalRelationships: totalRels,
             byType: summaryByType
@@ -922,7 +1176,7 @@ export class ObsidianResearchServer {
         logger.error(`Failed to analyze relationships for ${filePath}`, { error });
         fileRelationships.push({
           path: filePath,
-          title: this.extractBasename(filePath),
+          // Don't include title in error case since we use basename as fallback
           summary: { totalRelationships: 0, byType: {} },
           relationships: [],
           error: error instanceof Error ? error.message : String(error)
@@ -970,6 +1224,19 @@ export class ObsidianResearchServer {
     return path.split('/').pop()?.replace(/\.md$/, '') || path;
   }
 
+  private formatTargetTitle(path: string): Record<string, any> {
+    // Extract filename from path (same logic as extractBasename)
+    const filename = path.split('/').pop()?.replace(/\.md$/i, '') || '';
+    // Get the title using extractBasename
+    const title = this.extractBasename(path);
+    
+    // Only include title in result if it differs from filename
+    if (title !== filename) {
+      return { targetTitle: title };
+    }
+    return {};
+  }
+
   private calculateLinkStrength(contexts: any[]): number {
     if (!contexts || contexts.length === 0) return 0.5;
     
@@ -997,21 +1264,53 @@ export class ObsidianResearchServer {
     return Math.min(0.3 + (contexts.length * 0.1), 0.8);
   }
 
-  private async getLinkContext(sourcePath: string, targetPath: string): Promise<string | null> {
+  private async getLinkContext(sourcePath: string, targetPath: string): Promise<{context: string | null, lineNumber: number}> {
+    const contexts = await this.getAllLinkContexts(sourcePath, targetPath);
+    return contexts.length > 0 ? contexts[0] : { context: null, lineNumber: 0 };
+  }
+
+  private async getAllLinkContexts(sourcePath: string, targetPath: string): Promise<Array<{context: string, lineNumber: number}>> {
     try {
       const content = await obsidianAPI.getFileContent(sourcePath);
-      const targetBasename = this.extractBasename(targetPath);
       const lines = content.split('\n');
+      const foundContexts: Array<{context: string, lineNumber: number}> = [];
       
+      // Create multiple search patterns to improve link detection
+      const searchPatterns: string[] = [];
+      
+      if (targetPath.includes('#')) {
+        // Section link: try multiple variations
+        searchPatterns.push(targetPath.replace('.md#', '#'));  // "Note#section"
+        searchPatterns.push(targetPath);  // "Note.md#section"
+        searchPatterns.push(this.extractBasename(targetPath));  // Just the basename part
+      } else {
+        // Regular link: try multiple variations
+        const basename = this.extractBasename(targetPath);
+        searchPatterns.push(basename);  // "Note"
+        searchPatterns.push(targetPath);  // "Note.md" or full path
+        searchPatterns.push(`[[${basename}]]`);  // Wikilink format
+        searchPatterns.push(`[[${targetPath}]]`);  // Wikilink with extension
+        searchPatterns.push(`](${basename})`);  // Markdown link format
+        searchPatterns.push(`](${targetPath})`);  // Markdown link with extension
+      }
+      
+      // Search for all patterns that match
       for (let i = 0; i < lines.length; i++) {
-        if (lines[i].includes(targetBasename)) {
-          return lines[i].trim();
+        const line = lines[i];
+        for (const pattern of searchPatterns) {
+          if (line.includes(pattern)) {
+            // Avoid duplicate line entries by checking if lineNumber already exists
+            if (!foundContexts.some(ctx => ctx.lineNumber === i + 1)) {
+              foundContexts.push({ context: line.trim(), lineNumber: i + 1 });
+            }
+            break; // Don't check other patterns for this line once we find a match
+          }
         }
       }
       
-      return null;
+      return foundContexts;
     } catch (error) {
-      return null;
+      return [];
     }
   }
 
@@ -1092,18 +1391,12 @@ export class ObsidianResearchServer {
           break;
 
         case 'structure':
-        case 'elements':
-        case 'themes':
-        case 'quality':
-        case 'readability':
-        case 'connections':
-        case 'metadata':
-        default:
+        default: {
           // Use structure extractor for basic structural analysis
           const structure = await structureExtractor.extractStructure({
             paths,
             extractTypes: options.extractTypes || ['headings'],
-            includeHierarchy: options.includeHierarchy !== false,
+            includeHierarchy: true,
             includeContext: options.includeContext || false,
             contextWindow: options.contextWindow || 1,
             minHeadingLevel: options.minHeadingLevel,
@@ -1111,6 +1404,7 @@ export class ObsidianResearchServer {
           });
           results.analysis[analysisType] = structure;
           break;
+        }
       }
     }
     
@@ -1125,28 +1419,74 @@ export class ObsidianResearchServer {
   private async handleConsolidatedManage(args: any) {
     const { operation, source, target, parameters = {}, options = {} } = args;
     
+    // Validate operation type
+    if (typeof operation !== 'string' || !operation.trim()) {
+      const error = new Error(`Invalid operation type: expected non-empty string, got ${typeof operation}: "${operation}"`);
+      logger.error('Operation validation failed', { 
+        operation, 
+        operationType: typeof operation,
+        error: error.message
+      });
+      return {
+        content: [{
+          type: 'text',
+          text: JSON.stringify({
+            success: false,
+            operation: operation,
+            error: error.message,
+            validationFailure: 'OPERATION_TYPE_INVALID'
+          }, null, 2)
+        }]
+      };
+    }
+    
+    // Normalize operation and validate
+    const normalizedOperation = operation.toLowerCase().trim();
+    const allowedOperations = ['move', 'rename', 'copy', 'delete', 'create-dir', 'delete-dir', 'find-replace'];
+    
+    if (!allowedOperations.includes(normalizedOperation)) {
+      const error = new Error(`Unknown operation: "${operation}". Allowed operations: ${allowedOperations.join(', ')}`);
+      logger.error('Operation validation failed', { 
+        operation, 
+        normalizedOperation,
+        allowedOperations,
+        error: error.message
+      });
+      return {
+        content: [{
+          type: 'text',
+          text: JSON.stringify({
+            success: false,
+            operation: operation,
+            error: error.message,
+            validationFailure: 'OPERATION_NOT_ALLOWED'
+          }, null, 2)
+        }]
+      };
+    }
+    
     // Dry run preview mode
     if (options.dryRun) {
       return {
         content: [{
           type: 'text',
           text: JSON.stringify({
-            operation,
+            operation: normalizedOperation,
             source,
             target,
             parameters,
             dryRun: true,
-            message: `Preview: Would execute ${operation} operation`,
-            estimatedChanges: this.previewOperation(operation, source, target, parameters)
+            message: `Preview: Would execute ${normalizedOperation} operation`,
+            estimatedChanges: this.previewOperation(normalizedOperation, source, target, parameters)
           }, null, 2)
         }]
       };
     }
 
     try {
-      switch (operation) {
+      switch (normalizedOperation) {
         case 'move':
-        case 'rename':
+        case 'rename': {
           if (!target) {
             throw new Error('Target path is required for move/rename operations');
           }
@@ -1158,11 +1498,12 @@ export class ObsidianResearchServer {
             updateBacklinks: options.updateLinks !== false
           });
           
+          
           return {
             content: [{
               type: 'text',
               text: JSON.stringify({
-                operation: operation,
+                operation: normalizedOperation,
                 source,
                 target,
                 success: moveResult.success,
@@ -1174,8 +1515,9 @@ export class ObsidianResearchServer {
               }, null, 2)
             }]
           };
+        }
           
-        case 'copy':
+        case 'copy': {
           if (!target) {
             throw new Error('Target path is required for copy operations');
           }
@@ -1210,8 +1552,9 @@ export class ObsidianResearchServer {
               }, null, 2)
             }]
           };
+        }
           
-        case 'delete':
+        case 'delete': {
           // Create backup if requested
           if (options.createBackup) {
             const content = await obsidianAPI.getFileContent(source);
@@ -1240,8 +1583,9 @@ export class ObsidianResearchServer {
               }, null, 2)
             }]
           };
+        }
           
-        case 'create-dir':
+        case 'create-dir': {
           // Create directory using temp file approach
           const tempFilePath = `${source}/.tmp_dir_creation_${Date.now()}.md`;
           try {
@@ -1262,6 +1606,7 @@ export class ObsidianResearchServer {
           } catch (error) {
             throw new Error(`Failed to create directory: ${error instanceof Error ? error.message : String(error)}`);
           }
+        }
           
         case 'delete-dir':
           // For now, implement basic directory deletion
@@ -1277,7 +1622,7 @@ export class ObsidianResearchServer {
             }]
           };
           
-        case 'find-replace':
+        case 'find-replace': {
           if (!parameters.replacements || !Array.isArray(parameters.replacements)) {
             throw new Error('Replacements array is required for find-replace operations');
           }
@@ -1290,12 +1635,14 @@ export class ObsidianResearchServer {
               text: JSON.stringify(replaceResult, null, 2)
             }]
           };
+        }
           
         default:
           throw new Error(`Unknown operation: ${operation}`);
       }
       
     } catch (error) {
+      
       return {
         content: [{
           type: 'text',
@@ -1399,8 +1746,8 @@ export class ObsidianResearchServer {
     return { linksCleanedUp, filesUpdated, updatedFiles };
   }
 
-  private async performFindReplace(parameters: any, options: any): Promise<any> {
-    const { replacements, useRegex = false, caseSensitive = false, scope } = parameters;
+  private async performFindReplace(parameters: any, _options: any): Promise<any> {
+    const { replacements, useRegex = false, caseSensitive = false, preserveCase = true, scope } = parameters;
     
     // Get target files
     let targetFiles: string[] = [];
@@ -1443,7 +1790,15 @@ export class ObsidianResearchServer {
             const regex = new RegExp(search, flags);
             const matches = updatedContent.match(regex);
             if (matches) {
-              updatedContent = updatedContent.replace(regex, replace);
+              if (preserveCase && !caseSensitive) {
+                // Use callback function to preserve case for each match
+                updatedContent = updatedContent.replace(regex, (match) => {
+                  return smartPreserveCase(match, replace);
+                });
+              } else {
+                // Standard replacement without case preservation
+                updatedContent = updatedContent.replace(regex, replace);
+              }
               totalReplacements += matches.length;
               fileHadChanges = true;
             }
@@ -1455,7 +1810,15 @@ export class ObsidianResearchServer {
               const regex = new RegExp(escapeRegExp(search), caseSensitive ? 'g' : 'gi');
               const matches = updatedContent.match(regex);
               if (matches) {
-                updatedContent = updatedContent.replace(regex, replace);
+                if (preserveCase && !caseSensitive) {
+                  // Use callback function to preserve case for each match
+                  updatedContent = updatedContent.replace(regex, (match) => {
+                    return smartPreserveCase(match, replace);
+                  });
+                } else {
+                  // Standard replacement without case preservation
+                  updatedContent = updatedContent.replace(regex, replace);
+                }
                 totalReplacements += matches.length;
                 fileHadChanges = true;
               }
@@ -1489,9 +1852,58 @@ export class ObsidianResearchServer {
   }
 }
 
+// Helper function to detect and parse YAML frontmatter boundaries
+function parseFrontmatterBoundary(content: string): { hasFrontmatter: boolean; frontmatterEndIndex: number } {
+  if (!content.startsWith('---')) {
+    return { hasFrontmatter: false, frontmatterEndIndex: 0 };
+  }
+  
+  const lines = content.split('\n');
+  let frontmatterEndIndex = -1;
+  
+  // Look for closing --- delimiter (skip the opening ---)
+  for (let i = 1; i < lines.length; i++) {
+    if (lines[i].trim() === '---') {
+      // Calculate the index after the closing --- and its newline
+      frontmatterEndIndex = lines.slice(0, i + 1).join('\n').length;
+      break;
+    }
+  }
+  
+  // If we found a valid closing delimiter
+  if (frontmatterEndIndex > 0) {
+    return { hasFrontmatter: true, frontmatterEndIndex };
+  }
+  
+  // Malformed frontmatter (no closing ---), treat as no frontmatter
+  return { hasFrontmatter: false, frontmatterEndIndex: 0 };
+}
+
 // Utility function to escape regex special characters
 function escapeRegExp(string: string): string {
   return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// Smart case preservation utility for find-replace operations
+function smartPreserveCase(originalMatch: string, replacementText: string): string {
+  if (!originalMatch || !replacementText) {
+    return replacementText;
+  }
+
+  // If original is all uppercase -> make replacement all uppercase
+  if (originalMatch === originalMatch.toUpperCase() && originalMatch !== originalMatch.toLowerCase()) {
+    return replacementText.toUpperCase();
+  }
+  
+  // If original has first letter capitalized and rest lowercase -> capitalize replacement
+  if (originalMatch[0] === originalMatch[0].toUpperCase() && 
+      originalMatch.slice(1) === originalMatch.slice(1).toLowerCase() &&
+      originalMatch !== originalMatch.toLowerCase()) {
+    return replacementText.charAt(0).toUpperCase() + replacementText.slice(1).toLowerCase();
+  }
+  
+  // If original is all lowercase or mixed case -> keep replacement as-is (lowercase)
+  return replacementText.toLowerCase();
 }
 
 // Create and export server instance

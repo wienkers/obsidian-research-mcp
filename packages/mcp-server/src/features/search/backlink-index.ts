@@ -399,17 +399,26 @@ export class BacklinkIndexManager {
 
   /**
    * Extract all links from content (excluding embeds)
+   * Returns both regular links and section links (with # fragments)
    */
   private extractAllLinks(content: string): string[] {
     const links: Set<string> = new Set();
     
-    // Extract wiki links [[filename]] or [[filename|alias]] (but not embeds)
+    // Extract wiki links [[filename]] or [[filename|alias]] or [[filename#section]] (but not embeds)
     const wikiLinkRegex = /(?<!!)\[\[([^\]|]+)(\|([^\]]+))?\]\]/g;
     let match;
     while ((match = wikiLinkRegex.exec(content)) !== null) {
       const linkText = match[1].trim();
-      const normalizedLink = this.normalizeLinkPath(linkText);
-      links.add(normalizedLink);
+      // Don't normalize section links - preserve the # fragment
+      if (linkText.includes('#')) {
+        // For section links, add .md extension only to the file part
+        const [filePart, sectionPart] = linkText.split('#', 2);
+        const normalizedFile = filePart.endsWith('.md') ? filePart : filePart + '.md';
+        links.add(`${normalizedFile}#${sectionPart}`);
+      } else {
+        const normalizedLink = this.normalizeLinkPath(linkText);
+        links.add(normalizedLink);
+      }
     }
     
     // Extract markdown links [text](filename.md)
@@ -432,13 +441,20 @@ export class BacklinkIndexManager {
   private extractAllEmbeds(content: string): string[] {
     const embeds: Set<string> = new Set();
     
-    // Extract embeds ![[filename]]
+    // Extract embeds ![[filename]] or ![[filename#section]]
     const embedRegex = /!\[\[([^\]|]+)(\|([^\]]+))?\]\]/g;
     let match;
     while ((match = embedRegex.exec(content)) !== null) {
       const linkText = match[1].trim();
-      const normalizedLink = this.normalizeLinkPath(linkText);
-      embeds.add(normalizedLink);
+      // Handle section embeds similar to regular links
+      if (linkText.includes('#')) {
+        const [filePart, sectionPart] = linkText.split('#', 2);
+        const normalizedFile = filePart.endsWith('.md') ? filePart : filePart + '.md';
+        embeds.add(`${normalizedFile}#${sectionPart}`);
+      } else {
+        const normalizedLink = this.normalizeLinkPath(linkText);
+        embeds.add(normalizedLink);
+      }
     }
     
     return Array.from(embeds);
@@ -450,10 +466,13 @@ export class BacklinkIndexManager {
   private extractAllTags(content: string): string[] {
     const tags: Set<string> = new Set();
     
+    // First, remove all [[...]] patterns to avoid extracting hashtags from within links
+    const contentWithoutLinks = content.replace(/\[\[[^\]]*\]\]/g, '');
+    
     // Extract hashtags (including nested tags like #tag/subtag)
     const hashtagRegex = /#([a-zA-Z0-9_\/-]+)/g;
     let match;
-    while ((match = hashtagRegex.exec(content)) !== null) {
+    while ((match = hashtagRegex.exec(contentWithoutLinks)) !== null) {
       const tag = match[1].trim();
       tags.add(tag);
     }
@@ -473,11 +492,21 @@ export class BacklinkIndexManager {
           if (tagLine.startsWith('[') && tagLine.endsWith(']')) {
             // Array format: [tag1, tag2]
             const arrayTags = tagLine.slice(1, -1).split(',').map(t => t.trim().replace(/["']/g, ''));
-            arrayTags.forEach(tag => tag && tags.add(tag));
+            arrayTags.forEach(tag => {
+              // Filter out empty strings, single punctuation, and invalid tag patterns
+              if (tag && tag.length > 1 && !/^[^a-zA-Z0-9]+$/.test(tag)) {
+                tags.add(tag);
+              }
+            });
           } else {
-            // Space or comma separated
+            // Space or comma separated  
             const spaceTags = tagLine.split(/[,\s]+/).map(t => t.trim().replace(/["']/g, ''));
-            spaceTags.forEach(tag => tag && tags.add(tag));
+            spaceTags.forEach(tag => {
+              // Filter out empty strings, single punctuation, and invalid tag patterns
+              if (tag && tag.length > 1 && !/^[^a-zA-Z0-9]+$/.test(tag)) {
+                tags.add(tag);
+              }
+            });
           }
         }
       }
@@ -503,54 +532,118 @@ export class BacklinkIndexManager {
     const lines = content.split('\n');
     const targetBasename = this.extractBasename(targetPath);
     
+    // Escape special regex characters in the target names
+    const escapedBasename = targetBasename.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const escapedPathWithoutMd = targetPath.replace(/\.md$/, '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    
+    // Add temporary debug logging
+    logger.debug('Extracting link contexts', { 
+      targetPath, 
+      targetBasename, 
+      contentLines: lines.length,
+      escapedBasename,
+      escapedPathWithoutMd
+    });
+    
+    // Create multiple simple regex patterns for better reliability
+    const wikiLinkPatterns = [
+      new RegExp(`\\[\\[${escapedBasename}\\]\\]`, 'gi'),                    // [[NoteA]]
+      new RegExp(`\\[\\[${escapedBasename}\\|[^\\]]+\\]\\]`, 'gi'),          // [[NoteA|alias]]
+      new RegExp(`\\[\\[${escapedBasename}#[^\\]|]+\\]\\]`, 'gi'),           // [[NoteA#section]]
+      new RegExp(`\\[\\[${escapedBasename}#[^\\]|]+\\|[^\\]]+\\]\\]`, 'gi'), // [[NoteA#section|alias]]
+      new RegExp(`\\[\\[${escapedPathWithoutMd}\\]\\]`, 'gi'),               // [[NoteA]] (if targetPath was NoteA.md)
+      new RegExp(`\\[\\[${escapedPathWithoutMd}\\|[^\\]]+\\]\\]`, 'gi'),     // [[NoteA|alias]] (if targetPath was NoteA.md)
+      new RegExp(`\\[\\[${escapedPathWithoutMd}#[^\\]|]+\\]\\]`, 'gi'),      // [[NoteA#section]] (if targetPath was NoteA.md)
+      new RegExp(`\\[\\[${escapedPathWithoutMd}#[^\\]|]+\\|[^\\]]+\\]\\]`, 'gi') // [[NoteA#section|alias]] (if targetPath was NoteA.md)
+    ];
+    
+    const embedPatterns = [
+      new RegExp(`!\\[\\[${escapedBasename}\\]\\]`, 'gi'),                    // ![[NoteA]]
+      new RegExp(`!\\[\\[${escapedBasename}\\|[^\\]]+\\]\\]`, 'gi'),          // ![[NoteA|alias]]
+      new RegExp(`!\\[\\[${escapedBasename}#[^\\]|]+\\]\\]`, 'gi'),           // ![[NoteA#section]]
+      new RegExp(`!\\[\\[${escapedBasename}#[^\\]|]+\\|[^\\]]+\\]\\]`, 'gi'), // ![[NoteA#section|alias]]
+      new RegExp(`!\\[\\[${escapedPathWithoutMd}\\]\\]`, 'gi'),               // ![[NoteA]] (if targetPath was NoteA.md)
+      new RegExp(`!\\[\\[${escapedPathWithoutMd}\\|[^\\]]+\\]\\]`, 'gi'),     // ![[NoteA|alias]] (if targetPath was NoteA.md)
+      new RegExp(`!\\[\\[${escapedPathWithoutMd}#[^\\]|]+\\]\\]`, 'gi'),      // ![[NoteA#section]] (if targetPath was NoteA.md)
+      new RegExp(`!\\[\\[${escapedPathWithoutMd}#[^\\]|]+\\|[^\\]]+\\]\\]`, 'gi') // ![[NoteA#section|alias]] (if targetPath was NoteA.md)
+    ];
+    
+    const markdownLinkPatterns = [
+      new RegExp(`\\[([^\\]]+)\\]\\(${escapedBasename}\\)`, 'gi'),           // [text](NoteA)
+      new RegExp(`\\[([^\\]]+)\\]\\(${escapedBasename}\\.md\\)`, 'gi'),      // [text](NoteA.md)
+      new RegExp(`\\[([^\\]]+)\\]\\(${escapedPathWithoutMd}\\)`, 'gi'),      // [text](NoteA) (if targetPath was NoteA.md)
+      new RegExp(`\\[([^\\]]+)\\]\\(${escapedPathWithoutMd}\\.md\\)`, 'gi')  // [text](NoteA.md) (if targetPath was NoteA.md)
+    ];
+    
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
+      let foundMatch = false;
       
-      // Check for wiki links
-      const wikiLinkRegex = new RegExp(`\\[\\[([^\\]|]*${targetBasename}[^\\]|]*)([|]([^\\]]+))?\\]\\]`, 'gi');
-      if (wikiLinkRegex.test(line)) {
-        contexts.push({
-          line: i + 1,
-          text: line.trim(),
-          linkType: 'wikilink'
-        });
+      // Test wiki link patterns
+      for (const pattern of wikiLinkPatterns) {
+        pattern.lastIndex = 0; // Reset regex state
+        if (pattern.test(line)) {
+          logger.debug('Found wiki link match', { line: i + 1, text: line.trim(), pattern: pattern.source });
+          contexts.push({
+            line: i + 1,
+            text: line.trim(),
+            linkType: 'wikilink'
+          });
+          foundMatch = true;
+          break;
+        }
       }
       
-      // Check for embeds
-      const embedRegex = new RegExp(`!\\[\\[([^\\]|]*${targetBasename}[^\\]|]*)([|]([^\\]]+))?\\]\\]`, 'gi');
-      if (embedRegex.test(line)) {
-        contexts.push({
-          line: i + 1,
-          text: line.trim(),
-          linkType: 'embed'
-        });
+      if (foundMatch) continue;
+      
+      // Test embed patterns
+      for (const pattern of embedPatterns) {
+        pattern.lastIndex = 0; // Reset regex state
+        if (pattern.test(line)) {
+          logger.debug('Found embed match', { line: i + 1, text: line.trim(), pattern: pattern.source });
+          contexts.push({
+            line: i + 1,
+            text: line.trim(),
+            linkType: 'embed'
+          });
+          foundMatch = true;
+          break;
+        }
       }
       
-      // Check for markdown links
-      if (line.includes(targetPath) || line.includes(targetBasename)) {
-        const markdownLinkRegex = /\[([^\]]+)\]\(([^)]+)\)/g;
-        let match;
-        while ((match = markdownLinkRegex.exec(line)) !== null) {
-          const linkPath = match[2].trim();
-          if (linkPath.includes(targetBasename) || linkPath === targetPath) {
-            contexts.push({
-              line: i + 1,
-              text: line.trim(),
-              linkType: 'markdown'
-            });
-          }
+      if (foundMatch) continue;
+      
+      // Test markdown link patterns
+      for (const pattern of markdownLinkPatterns) {
+        pattern.lastIndex = 0; // Reset regex state
+        if (pattern.test(line)) {
+          logger.debug('Found markdown link match', { line: i + 1, text: line.trim(), pattern: pattern.source });
+          contexts.push({
+            line: i + 1,
+            text: line.trim(),
+            linkType: 'markdown'
+          });
+          foundMatch = true;
+          break;
         }
       }
     }
+    
+    logger.debug('Link context extraction complete', { 
+      targetPath, 
+      contextsFound: contexts.length,
+      contexts: contexts.map(c => ({ line: c.line, linkType: c.linkType }))
+    });
     
     return contexts;
   }
 
   /**
    * Normalize link paths for consistent indexing
+   * Note: This method should only be used for regular links, not section links
    */
   private normalizeLinkPath(linkPath: string): string {
-    // Remove query parameters and fragments
+    // Remove query parameters and fragments (for regular links only)
     const cleanPath = linkPath.split('?')[0].split('#')[0].trim();
     
     // Add .md extension if not already present
@@ -637,28 +730,67 @@ export class BacklinkIndexManager {
     
     const lines = content.split('\n');
     
-    // Create regex to find mentions that are NOT already linked
-    const basenameRegex = new RegExp(`\\b${targetBasename.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'gi');
+    // Create multiple search patterns for better mention detection
+    const searchPatterns = [
+      targetBasename,                    // "Note Name"
+      targetPath.replace(/\.md$/, ''),   // Without extension
+      targetPath,                       // With extension
+    ];
+    
+    // Add pattern variations for better matching
+    const enhancedPatterns: string[] = [];
+    for (const pattern of searchPatterns) {
+      enhancedPatterns.push(pattern);
+      
+      // Add case variations
+      enhancedPatterns.push(pattern.toLowerCase());
+      enhancedPatterns.push(pattern.toUpperCase());
+      
+      // Add patterns with spaces replaced by underscores and vice versa
+      if (pattern.includes(' ')) {
+        enhancedPatterns.push(pattern.replace(/\s+/g, '_'));
+        enhancedPatterns.push(pattern.replace(/\s+/g, '-'));
+      }
+      if (pattern.includes('_')) {
+        enhancedPatterns.push(pattern.replace(/_/g, ' '));
+      }
+      if (pattern.includes('-')) {
+        enhancedPatterns.push(pattern.replace(/-/g, ' '));
+      }
+    }
+    
+    // Remove duplicates
+    const uniquePatterns = [...new Set(enhancedPatterns)];
     
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
       
-      // Skip lines that already contain links to this file
-      if (line.includes(`[[${targetBasename}]]`) || 
-          line.includes(`[[${targetPath}]]`) || 
-          line.includes(`[](${targetPath})`) ||
-          line.includes(`![[${targetBasename}]]`) ||
-          line.includes(`![[${targetPath}]]`)) {
-        continue;
-      }
+      // Create a version of the line with all wiki-style links removed to find unlinked mentions
+      const lineWithoutWikiLinks = line.replace(/\[\[[^\]]*\]\]/g, '').replace(/!\[\[[^\]]*\]\]/g, '');
       
-      // Check for basename mentions
-      if (basenameRegex.test(line)) {
-        contexts.push({
-          line: i + 1,
-          text: line.trim(),
-          mentionType: 'basename'
-        });
+      // Also remove markdown-style links
+      const lineWithoutLinks = lineWithoutWikiLinks.replace(/\[([^\]]+)\]\([^)]+\)/g, '');
+      
+      // Check each pattern for mentions
+      for (const pattern of uniquePatterns) {
+        if (pattern.length < 2) continue; // Skip very short patterns
+        
+        // Use case-insensitive matching without word boundaries for better results
+        const caseInsensitivePattern = pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const mentionRegex = new RegExp(caseInsensitivePattern, 'gi');
+        
+        if (mentionRegex.test(lineWithoutLinks)) {
+          // Check if we already found this line to avoid duplicates
+          const existingContext = contexts.find(ctx => ctx.line === i + 1);
+          if (!existingContext) {
+            contexts.push({
+              line: i + 1,
+              text: line.trim(),
+              mentionType: 'basename'
+            });
+          }
+          break; // Found a match on this line, move to next line
+        }
       }
     }
     
@@ -680,13 +812,23 @@ export class BacklinkIndexManager {
     }> = [];
     
     const lines = content.split('\n');
-    const targetBasename = this.extractBasename(targetPath);
+    
+    // For section embeds like "Pattern Test Note.md#Email Patterns", search for "Pattern Test Note#Email Patterns"
+    // For regular embeds like "Simple Note.md", search for "Simple Note"
+    let searchTarget: string;
+    if (targetPath.includes('#')) {
+      // Section embed: remove .md extension but keep the #section part  
+      searchTarget = targetPath.replace('.md#', '#');
+    } else {
+      // Regular embed: just use the basename
+      searchTarget = this.extractBasename(targetPath);
+    }
     
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
       
-      // Check for embeds
-      const embedRegex = new RegExp(`!\\[\\[([^\\]|]*${targetBasename}[^\\]|]*)([|]([^\\]]+))?\\]\\]`, 'gi');
+      // Check for embeds with the proper search target
+      const embedRegex = new RegExp(`!\\[\\[([^\\]|]*${searchTarget.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[^\\]|]*)([|]([^\\]]+))?\\]\\]`, 'gi');
       let match;
       while ((match = embedRegex.exec(line)) !== null) {
         const embedPath = match[1].trim();

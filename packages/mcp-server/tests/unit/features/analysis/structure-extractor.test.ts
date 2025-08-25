@@ -39,6 +39,30 @@ describe('StructureExtractor', () => {
     vi.clearAllMocks();
   });
 
+  // Helper function to extract all elements from hierarchy structure
+  function extractElementsFromHierarchy(hierarchy: any): any[] {
+    const elements: any[] = [];
+    
+    function traverse(sections: any[]) {
+      for (const section of sections) {
+        // Add the heading
+        elements.push(section.heading);
+        // Add all children
+        elements.push(...section.children);
+        // Recursively traverse subsections
+        if (section.subsections && section.subsections.length > 0) {
+          traverse(section.subsections);
+        }
+      }
+    }
+    
+    if (hierarchy?.sections) {
+      traverse(hierarchy.sections);
+    }
+    
+    return elements;
+  }
+
   describe('extractStructure', () => {
     const sampleMarkdownContent = `# Main Title
 
@@ -111,7 +135,6 @@ Some final content.
       const options = {
         paths: ['test.md'],
         extractTypes: ['headings', 'lists', 'code_blocks', 'tasks', 'quotes', 'tables', 'links', 'embeds'] as const,
-        includeHierarchy: true,
         includeContext: false
       };
 
@@ -120,56 +143,58 @@ Some final content.
       expect(result.files).toHaveLength(1);
       const fileStructure = result.files[0];
 
+      // Extract all elements from hierarchy
+      const elements = extractElementsFromHierarchy(fileStructure.hierarchy);
+
       // Test headings extraction
-      const headings = fileStructure.elements.filter(e => e.type === 'headings');
+      const headings = elements.filter(e => e.type === 'headings');
       expect(headings.length).toBeGreaterThanOrEqual(4); // At least Main Title, Section One, Subsection 1.1, Section Two, Section Three
-      expect(headings.map(h => h.content)).toContain('Main Title');
-      expect(headings.map(h => h.content)).toContain('Section One');
-      expect(headings.map(h => h.content)).toContain('Subsection 1.1');
+      expect(headings.map(h => h.content)).toContain('# Main Title');
+      expect(headings.map(h => h.content)).toContain('## Section One');
+      expect(headings.map(h => h.content)).toContain('### Subsection 1.1');
 
       // Test lists extraction
-      const lists = fileStructure.elements.filter(e => e.type === 'lists');
+      const lists = elements.filter(e => e.type === 'lists');
       expect(lists.length).toBeGreaterThan(0);
       expect(lists.some(l => l.content.includes('First list item'))).toBe(true);
 
       // Test code blocks extraction
-      const codeBlocks = fileStructure.elements.filter(e => e.type === 'code_blocks');
+      const codeBlocks = elements.filter(e => e.type === 'code_blocks');
       expect(codeBlocks).toHaveLength(1);
       expect(codeBlocks[0].language).toBe('javascript');
       expect(codeBlocks[0].content).toContain('function example()');
 
       // Test tasks extraction
-      const tasks = fileStructure.elements.filter(e => e.type === 'tasks');
+      const tasks = elements.filter(e => e.type === 'tasks');
       expect(tasks).toHaveLength(3);
       expect(tasks.filter(t => t.completed).length).toBe(2); // Two completed tasks
       expect(tasks.filter(t => !t.completed).length).toBe(1); // One incomplete task
 
       // Test quotes extraction
-      const quotes = fileStructure.elements.filter(e => e.type === 'quotes');
+      const quotes = elements.filter(e => e.type === 'quotes');
       expect(quotes).toHaveLength(1);
       expect(quotes[0].content).toContain('This is a blockquote');
 
       // Test tables extraction
-      const tables = fileStructure.elements.filter(e => e.type === 'tables');
+      const tables = elements.filter(e => e.type === 'tables');
       expect(tables).toHaveLength(1);
       expect(tables[0].content).toContain('Name | Age | City');
 
       // Test links extraction
-      const links = fileStructure.elements.filter(e => e.type === 'links');
+      const links = elements.filter(e => e.type === 'links');
       expect(links.length).toBeGreaterThan(0);
       expect(links.some(l => l.content.includes('link to another note'))).toBe(true);
 
       // Test embeds extraction
-      const embeds = fileStructure.elements.filter(e => e.type === 'embeds');
+      const embeds = elements.filter(e => e.type === 'embeds');
       expect(embeds.length).toBeGreaterThan(0);
       expect(embeds.some(e => e.content.includes('Embedded note'))).toBe(true);
     });
 
-    it('should build hierarchy when includeHierarchy is true', async () => {
+    it('should build hierarchy structure', async () => {
       const options = {
         paths: ['test.md'],
         extractTypes: ['headings'] as const,
-        includeHierarchy: true,
         includeContext: false
       };
 
@@ -180,7 +205,7 @@ Some final content.
       expect(fileStructure.hierarchy?.sections).toHaveLength(1); // Main Title section
 
       const mainSection = fileStructure.hierarchy?.sections[0];
-      expect(mainSection?.heading.content).toBe('Main Title');
+      expect(mainSection?.heading.content).toBe('# Main Title');
       expect(mainSection?.level).toBe(1);
       expect(mainSection?.subsections.length).toBeGreaterThan(0); // Should have subsections
     });
@@ -189,7 +214,6 @@ Some final content.
       const options = {
         paths: ['test.md'],
         extractTypes: ['headings'] as const,
-        includeHierarchy: false,
         includeContext: true,
         contextWindow: 2
       };
@@ -197,20 +221,83 @@ Some final content.
       const result = await structureExtractor.extractStructure(options);
       const fileStructure = result.files[0];
 
-      const headingsWithContext = fileStructure.elements.filter(e => e.type === 'headings' && e.context);
+      // Extract all elements from hierarchy
+      const elements = extractElementsFromHierarchy(fileStructure.hierarchy);
+      const headingsWithContext = elements.filter(e => e.type === 'headings' && e.context);
       expect(headingsWithContext.length).toBeGreaterThan(0);
 
       // Check that context includes preceding and following text
-      const sectionOneHeading = headingsWithContext.find(h => h.content === 'Section One');
+      const sectionOneHeading = headingsWithContext.find(h => h.content === '## Section One');
       expect(sectionOneHeading?.context?.precedingText).toBeDefined();
       expect(sectionOneHeading?.context?.followingText).toBeDefined();
+    });
+
+    it('should include parentHeading as raw heading with hash symbols in context', async () => {
+      const contentWithNestedHeadings = `# Main Title
+
+This is the introduction.
+
+## Section One
+
+Content under section one.
+
+### Subsection 1.1
+
+Content under subsection with parent heading context.
+
+## Section Two
+
+More content.
+`;
+
+      vi.mocked(batchReader.readMultipleNotes).mockResolvedValue([
+        {
+          success: true,
+          path: 'nested.md',
+          note: {
+            path: 'nested.md',
+            content: contentWithNestedHeadings,
+            frontmatter: {},
+            tags: [],
+            links: [],
+            backlinks: []
+          }
+        }
+      ]);
+
+      const options = {
+        paths: ['nested.md'],
+        extractTypes: ['headings', 'lists'] as const,
+        includeContext: true,
+        contextWindow: 1
+      };
+
+      const result = await structureExtractor.extractStructure(options);
+      const fileStructure = result.files[0];
+
+      // Extract all elements from hierarchy
+      const elements = extractElementsFromHierarchy(fileStructure.hierarchy);
+      
+      // Find the subsection heading which should have a parent heading
+      const subsectionHeading = elements.find(e => e.content === '### Subsection 1.1');
+      expect(subsectionHeading).toBeDefined();
+      expect(subsectionHeading?.context?.parentHeading).toBe('## Section One');
+      
+      // Check that Section One has Main Title as parent
+      const sectionOneHeading = elements.find(e => e.content === '## Section One');
+      expect(sectionOneHeading).toBeDefined();
+      expect(sectionOneHeading?.context?.parentHeading).toBe('# Main Title');
+      
+      // Main title should not have a parent heading
+      const mainTitleHeading = elements.find(e => e.content === '# Main Title');
+      expect(mainTitleHeading).toBeDefined();
+      expect(mainTitleHeading?.context?.parentHeading).toBeUndefined();
     });
 
     it('should filter headings by level when min/max specified', async () => {
       const options = {
         paths: ['test.md'],
         extractTypes: ['headings'] as const,
-        includeHierarchy: false,
         includeContext: false,
         minHeadingLevel: 2,
         maxHeadingLevel: 2
@@ -219,20 +306,21 @@ Some final content.
       const result = await structureExtractor.extractStructure(options);
       const fileStructure = result.files[0];
 
-      const headings = fileStructure.elements.filter(e => e.type === 'headings');
+      // Extract all elements from hierarchy
+      const elements = extractElementsFromHierarchy(fileStructure.hierarchy);
+      const headings = elements.filter(e => e.type === 'headings');
       // Should only include level 2 headings
       expect(headings.every(h => h.level === 2)).toBe(true);
-      expect(headings.map(h => h.content)).toContain('Section One');
-      expect(headings.map(h => h.content)).toContain('Section Two');
-      expect(headings.map(h => h.content)).not.toContain('Main Title'); // Level 1
-      expect(headings.map(h => h.content)).not.toContain('Subsection 1.1'); // Level 3
+      expect(headings.map(h => h.content)).toContain('## Section One');
+      expect(headings.map(h => h.content)).toContain('## Section Two');
+      expect(headings.map(h => h.content)).not.toContain('# Main Title'); // Level 1
+      expect(headings.map(h => h.content)).not.toContain('### Subsection 1.1'); // Level 3
     });
 
     it('should calculate correct file summary', async () => {
       const options = {
         paths: ['test.md'],
         extractTypes: ['headings', 'tasks'] as const,
-        includeHierarchy: false,
         includeContext: false
       };
 
@@ -282,7 +370,6 @@ Some final content.
       const options = {
         paths: ['file1.md', 'file2.md'],
         extractTypes: ['headings'] as const,
-        includeHierarchy: false,
         includeContext: false
       };
 
@@ -313,7 +400,6 @@ Some final content.
       const options = {
         paths: ['empty.md'],
         extractTypes: ['headings'] as const,
-        includeHierarchy: false,
         includeContext: false
       };
 
@@ -322,7 +408,8 @@ Some final content.
       // The actual mock implementation might not return files for empty content
       expect(result.files.length).toBeGreaterThanOrEqual(0);
       if (result.files.length > 0) {
-        expect(result.files[0].elements).toHaveLength(0);
+        const elements = extractElementsFromHierarchy(result.files[0].hierarchy);
+        expect(elements).toHaveLength(0);
         expect(result.files[0].summary.totalElements).toBe(0);
       }
     });
@@ -339,7 +426,6 @@ Some final content.
       const options = {
         paths: ['missing.md'],
         extractTypes: ['headings'] as const,
-        includeHierarchy: false,
         includeContext: false
       };
 
@@ -354,7 +440,9 @@ Some final content.
         files: [{
           path: 'cached.md',
           title: 'Cached File',
-          elements: [],
+          hierarchy: {
+            sections: []
+          },
           summary: {
             totalElements: 0,
             byType: {} as any,
@@ -375,7 +463,6 @@ Some final content.
       const options = {
         paths: ['cached.md'],
         extractTypes: ['headings'] as const,
-        includeHierarchy: false,
         includeContext: false
       };
 
@@ -389,7 +476,6 @@ Some final content.
       const options = {
         paths: ['test.md'],
         extractTypes: ['headings'] as const,
-        includeHierarchy: false,
         includeContext: false
       };
 
@@ -433,12 +519,12 @@ Not a table line with | pipe but no proper structure.
       const options = {
         paths: ['test.md'],
         extractTypes: ['tables'] as const,
-        includeHierarchy: false,
         includeContext: false
       };
 
       const result = await structureExtractor.extractStructure(options);
-      const tables = result.files[0].elements.filter(e => e.type === 'tables');
+      const elements = extractElementsFromHierarchy(result.files[0].hierarchy);
+      const tables = elements.filter(e => e.type === 'tables');
 
       expect(tables).toHaveLength(0);
     });
@@ -471,12 +557,12 @@ Not a table line with | pipe but no proper structure.
       const options = {
         paths: ['test.md'],
         extractTypes: ['tables'] as const,
-        includeHierarchy: false,
         includeContext: false
       };
 
       const result = await structureExtractor.extractStructure(options);
-      const tables = result.files[0].elements.filter(e => e.type === 'tables');
+      const elements = extractElementsFromHierarchy(result.files[0].hierarchy);
+      const tables = elements.filter(e => e.type === 'tables');
 
       expect(tables).toHaveLength(1);
       expect(tables[0].content).toContain('Column 1');
@@ -512,7 +598,6 @@ More content.
       const options = {
         paths: ['document.md'],
         extractTypes: ['headings'] as const,
-        includeHierarchy: false,
         includeContext: false
       };
 
@@ -545,7 +630,6 @@ Content without main title.
       const options = {
         paths: ['path/to/document.md'],
         extractTypes: ['headings'] as const,
-        includeHierarchy: false,
         includeContext: false
       };
 
